@@ -105,10 +105,11 @@ pub(crate) fn sink_for<'a>(column: &'a Column, capacity: usize) -> Option<Box<dy
 
 /// Write one block of every output column.
 ///
-/// A block in which at most two rows in five survive is emitted through a
-/// list of row indices when there are several columns: the list is built once
-/// and each column then touches only the rows it keeps, which is cheaper than
-/// decoding the mask again per column.
+/// A sparse block is emitted through a list of row indices when there are
+/// several columns: the list is built once and each column then touches only
+/// the rows it keeps, which is cheaper than decoding the mask again per
+/// column. "Sparse" depends on what decoding costs: up to two rows in five
+/// with the AVX2 permutation tables, one in eight with AVX-512 compression.
 #[inline]
 pub(crate) fn emit_block(
     sinks: &[Box<dyn Sink + '_>],
@@ -119,7 +120,8 @@ pub(crate) fn emit_block(
     stream: bool,
     idx: &mut Vec<u32>,
 ) {
-    if sinks.len() >= 2 && 5 * count <= 2 * rows.len() {
+    let sparse = if kernels::level() >= kernels::Level::Avx512 { 8 * count <= rows.len() } else { 5 * count <= 2 * rows.len() };
+    if sinks.len() >= 2 && sparse {
         kernels::mask_indices_into(mask, rows.len(), 0, idx);
         for sink in sinks {
             sink.emit_indices(rows.start, idx, offset, stream);
