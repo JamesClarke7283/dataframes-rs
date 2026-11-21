@@ -277,96 +277,200 @@ cmp_scalar_kernel!(
 // compaction
 // ---------------------------------------------------------------------------
 
-/// Compact 8-byte elements.
+// A dense word is compacted in vector steps (four 64-bit or eight 32-bit lanes
+// each). The output offset of every step is computed for the whole word up
+// front, so a step is a table load, a permute and a store, and no step depends
+// on the one before it.
+//
+// A sparse word is compacted by a fixed number of scalar steps instead: take
+// the lowest set bit, copy that element, clear the bit. The step count is
+// chosen per group of words from the group's density, so the loop has no
+// data-dependent branch; steps past the population count copy a harmless
+// element to slots beyond the output cursor.
+
+const M55: u64 = 0x5555_5555_5555_5555;
+const M33: u64 = 0x3333_3333_3333_3333;
+const M0F: u64 = 0x0F0F_0F0F_0F0F_0F0F;
+const M01: u64 = 0x0101_0101_0101_0101;
+
+/// Mask words whose density is examined together to pick a strategy.
+const GROUP_WORDS: usize = 16;
+
+/// Compact the 64 eight-byte elements at `base` selected by `w` to `dst`.
 ///
 /// # Safety
-/// As [`scalar::compact`], plus the CPU must support AVX2/POPCNT.
-#[target_feature(enable = "avx2,popcnt")]
-pub unsafe fn compact8(values: *const u64, mask: &[u64], n: usize, out: *mut u64, out_cap: usize) -> usize {
-    const LANES: usize = 4;
-    let full = n / 64;
+/// `base` must be valid for 64 reads and `dst` for `w.count_ones() + 4`
+/// writes; AVX2 must be available.
+#[inline(always)]
+unsafe fn dense_word8(w: u64, base: *const u64, dst: *mut u64) {
     let table = PERM64.0.as_ptr();
-    let mut o = 0usize;
-    let mut wi = 0;
-    // SAFETY: each loop iteration reads the 64 in-bounds elements of a full
-    // word. A vector store at cursor `c` touches `c..c+LANES`; the largest
-    // cursor used for word `wi` is below `o + pc`, and the loop only proceeds
-    // while `o + pc + LANES <= out_cap`.
+    // Population count of every nibble, then running totals per byte: the
+    // output offset of every step is known before the first one runs.
+    let n1 = w - ((w >> 1) & M55);
+    let n2 = (n1 & M33) + ((n1 >> 2) & M33);
+    let even = n2 & M0F;
+    let starts = (even + ((n2 >> 4) & M0F)).wrapping_mul(M01) << 8; // where each even nibble's output begins
+    let odd_starts = starts + even; // and each odd nibble's
+    // SAFETY: step `k` reads elements `4k..4k + 4` and writes four elements
+    // at an offset below the population count; table indices are below 16.
     unsafe {
-        while wi < full {
-            let w = *mask.get_unchecked(wi);
-            if w != 0 {
-                let pc = w.count_ones() as usize;
-                if o + pc + LANES > out_cap {
-                    break;
-                }
-                let base = values.add(wi * 64);
-                if w == u64::MAX {
-                    std::ptr::copy_nonoverlapping(base, out.add(o), 64);
-                    o += 64;
-                } else {
-                    let mut m = w;
-                    let mut k = 0;
-                    while k < 16 {
-                        let mb = (m & 0xF) as usize;
-                        let v = _mm256_loadu_si256(base.add(k * LANES).cast());
-                        let p = _mm256_load_si256(table.add(mb).cast());
-                        _mm256_storeu_si256(out.add(o).cast(), _mm256_permutevar8x32_epi32(v, p));
-                        o += (mb as u32).count_ones() as usize;
-                        m >>= 4;
-                        k += 1;
-                    }
-                }
-            }
-            wi += 1;
+        let mut k = 0;
+        while k < 16 {
+            let chunk = ((w >> (4 * k)) & 0xF) as usize;
+            let from = if k & 1 == 0 { starts } else { odd_starts };
+            let o = ((from >> (8 * (k >> 1))) & 0xFF) as usize;
+            let v = _mm256_loadu_si256(base.add(4 * k).cast());
+            let p = _mm256_load_si256(table.add(chunk).cast());
+            _mm256_storeu_si256(dst.add(o).cast(), _mm256_permutevar8x32_epi32(v, p));
+            k += 1;
         }
-        o + scalar::compact_exact(values, mask, wi, n, out.add(o), out_cap - o)
     }
 }
 
-/// Compact 4-byte elements.
+/// Compact the 64 four-byte elements at `base` selected by `w` to `dst`.
 ///
 /// # Safety
-/// As [`scalar::compact`], plus the CPU must support AVX2/POPCNT.
-#[target_feature(enable = "avx2,popcnt")]
-pub unsafe fn compact4(values: *const u32, mask: &[u64], n: usize, out: *mut u32, out_cap: usize) -> usize {
-    const LANES: usize = 8;
-    let full = n / 64;
+/// `base` must be valid for 64 reads and `dst` for `w.count_ones() + 8`
+/// writes; AVX2 must be available.
+#[inline(always)]
+unsafe fn dense_word4(w: u64, base: *const u32, dst: *mut u32) {
     let table = PERM32.0.as_ptr();
-    let mut o = 0usize;
-    let mut wi = 0;
-    // SAFETY: see `compact8`.
+    let n1 = w - ((w >> 1) & M55);
+    let n2 = (n1 & M33) + ((n1 >> 2) & M33);
+    let starts = ((n2 + (n2 >> 4)) & M0F).wrapping_mul(M01) << 8; // where each byte's output begins
+    // SAFETY: as `dense_word8`, with step `k` reading elements `8k..8k + 8`
+    // and table indices below 256.
     unsafe {
-        while wi < full {
-            let w = *mask.get_unchecked(wi);
-            if w != 0 {
-                let pc = w.count_ones() as usize;
-                if o + pc + LANES > out_cap {
-                    break;
-                }
-                let base = values.add(wi * 64);
-                if w == u64::MAX {
-                    std::ptr::copy_nonoverlapping(base, out.add(o), 64);
-                    o += 64;
-                } else {
-                    let mut m = w;
-                    let mut k = 0;
-                    while k < 8 {
-                        let mb = (m & 0xFF) as usize;
-                        let v = _mm256_loadu_si256(base.add(k * LANES).cast());
-                        let p = _mm256_load_si256(table.add(mb).cast());
-                        _mm256_storeu_si256(out.add(o).cast(), _mm256_permutevar8x32_epi32(v, p));
-                        o += (mb as u32).count_ones() as usize;
-                        m >>= 8;
-                        k += 1;
-                    }
-                }
-            }
-            wi += 1;
+        let mut k = 0;
+        while k < 8 {
+            let chunk = ((w >> (8 * k)) & 0xFF) as usize;
+            let o = ((starts >> (8 * k)) & 0xFF) as usize;
+            let v = _mm256_loadu_si256(base.add(8 * k).cast());
+            let p = _mm256_load_si256(table.add(chunk).cast());
+            _mm256_storeu_si256(dst.add(o).cast(), _mm256_permutevar8x32_epi32(v, p));
+            k += 1;
         }
-        o + scalar::compact_exact(values, mask, wi, n, out.add(o), out_cap - o)
     }
 }
+
+/// Copy the elements at `base` selected by `w` — at most `K` of them — to
+/// `dst` in `K` branch-free steps.
+///
+/// # Safety
+/// `base` must be valid for 65 reads (a step past the last set bit reads
+/// element 64) and `dst` for `K` writes; BMI1 must be available.
+#[inline(always)]
+unsafe fn sparse_word<T: Copy, const K: usize>(w: u64, base: *const T, dst: *mut T) {
+    let mut m = w;
+    let mut j = 0;
+    while j < K {
+        // SAFETY: `tzcnt` is at most 64; the caller vouches for both ranges
+        // and for BMI1.
+        unsafe {
+            dst.add(j).write(base.add(_tzcnt_u64(m) as usize).read());
+            m = _blsr_u64(m);
+        }
+        j += 1;
+    }
+}
+
+/// Number of sparse steps per word for a group of `words` mask words holding
+/// `ones` set bits (0: use the dense steps). `dense_cost` is the cost of a
+/// dense word in units of one sparse step.
+#[inline(always)]
+fn sparse_steps(ones: usize, words: usize, dense_cost: usize) -> usize {
+    // A step count is used when hardly any word of that density exceeds it.
+    if 2 * ones <= 3 * words {
+        4
+    } else if ones <= 4 * words {
+        8
+    } else if dense_cost > 16 && 2 * ones <= 13 * words {
+        12
+    } else {
+        0
+    }
+}
+
+macro_rules! compact_kernel {
+    ($(#[$doc:meta])* $name:ident, $elem:ty, lanes = $lanes:expr, dense = $dense:ident, dense_cost = $cost:expr) => {
+        $(#[$doc])*
+        ///
+        /// # Safety
+        /// As [`scalar::compact`], plus the CPU must support AVX2, BMI1 and POPCNT.
+        #[target_feature(enable = "avx2,bmi1,popcnt")]
+        pub unsafe fn $name(values: *const $elem, mask: &[u64], n: usize, out: *mut $elem, out_cap: usize) -> usize {
+            const LANES: usize = $lanes;
+            let full = n / 64;
+            // A sparse step may read the element after its word, which the
+            // last full word only has if a partial word follows it.
+            let sparse_limit = if n > full * 64 { full } else { full.saturating_sub(1) };
+            let mut o = 0usize;
+            let mut wi = 0;
+            // SAFETY: every word visited is a full word, so its 64 elements
+            // are in bounds. A dense word writes whole vectors at cursors
+            // below `o + pc`, and runs only if `o + pc + LANES <= out_cap`; a
+            // sparse word writes `K` elements at `o` and runs only if
+            // `o + K <= out_cap` and its population count is at most `K`.
+            unsafe {
+                'groups: while wi < full {
+                    let end = (wi + GROUP_WORDS).min(full);
+                    let ones: usize = mask.get_unchecked(wi..end).iter().map(|w| w.count_ones() as usize).sum();
+                    let steps = sparse_steps(ones, end - wi, $cost);
+                    macro_rules! sparse_run {
+                        ($k:literal) => {
+                            while wi < end.min(sparse_limit) {
+                                let w = *mask.get_unchecked(wi);
+                                let pc = w.count_ones() as usize;
+                                if pc > $k {
+                                    break; // denser than its group: the dense loop takes over
+                                }
+                                if o + $k > out_cap {
+                                    break 'groups;
+                                }
+                                sparse_word::<$elem, $k>(w, values.add(wi * 64), out.add(o));
+                                o += pc;
+                                wi += 1;
+                            }
+                        };
+                    }
+                    match steps {
+                        4 => sparse_run!(4),
+                        8 => sparse_run!(8),
+                        12 => sparse_run!(12),
+                        _ => {}
+                    }
+                    while wi < end {
+                        let w = *mask.get_unchecked(wi);
+                        if w != 0 {
+                            let pc = w.count_ones() as usize;
+                            if o + pc + LANES > out_cap {
+                                break 'groups;
+                            }
+                            let base = values.add(wi * 64);
+                            if w == u64::MAX {
+                                std::ptr::copy_nonoverlapping(base, out.add(o), 64);
+                            } else {
+                                $dense(w, base, out.add(o));
+                            }
+                            o += pc;
+                        }
+                        wi += 1;
+                    }
+                }
+                o + scalar::compact_exact(values, mask, wi, n, out.add(o), out_cap - o)
+            }
+        }
+    };
+}
+
+compact_kernel!(
+    /// Compact 8-byte elements.
+    compact8, u64, lanes = 4, dense = dense_word8, dense_cost = 27
+);
+compact_kernel!(
+    /// Compact 4-byte elements.
+    compact4, u32, lanes = 8, dense = dense_word4, dense_cost = 16
+);
 
 /// Compact 2-byte elements.
 ///
@@ -534,13 +638,6 @@ impl StreamOut {
         }
     }
 
-    #[inline(always)]
-    fn cursor(&mut self) -> *mut u8 {
-        // SAFETY: `fill < STAGE_BYTES + 64 * 8` is maintained by the callers,
-        // which flush after every mask word.
-        unsafe { self.stage.0.as_mut_ptr().cast::<u8>().add(self.fill) }
-    }
-
     /// Write the whole lines of the stage to the destination and keep the
     /// remainder. Returns the number of bytes moved out of the stage.
     ///
@@ -608,7 +705,7 @@ impl StreamOut {
 }
 
 macro_rules! compact_stream_kernel {
-    ($(#[$doc:meta])* $name:ident, $elem:ty, lanes = $lanes:expr, steps = $steps:expr, bits = $bits:expr, table = $table:ident) => {
+    ($(#[$doc:meta])* $name:ident, $elem:ty, dense = $dense:ident, dense_cost = $cost:expr) => {
         $(#[$doc])*
         ///
         /// Writes exactly one element per selected row and nothing else, and
@@ -618,75 +715,106 @@ macro_rules! compact_stream_kernel {
         /// * `values` must be valid for `n` reads and `mask` must cover `n` bits.
         /// * `out` must be valid for `out_cap` writes, aligned for the element
         ///   type, and must not overlap `values`.
-        /// * The CPU must support AVX2 and POPCNT.
+        /// * The CPU must support AVX2, BMI1 and POPCNT.
         /// * Non-temporal stores are weakly ordered: the calling thread must
         ///   execute `SFENCE` (see `pipeline::stream_fence`) before the output
         ///   is read by anyone. Drivers do this once per worker.
-        #[target_feature(enable = "avx2,popcnt")]
+        #[target_feature(enable = "avx2,bmi1,popcnt")]
         pub unsafe fn $name(values: *const $elem, mask: &[u64], n: usize, out: *mut $elem, out_cap: usize) -> usize {
             const SIZE: usize = size_of::<$elem>();
             let full = n / 64;
             let n_words = n.div_ceil(64);
-            let table = $table.0.as_ptr();
-            // SAFETY: see the per-step comments.
+            let sparse_limit = if n > full * 64 { full } else { full.saturating_sub(1) };
+            // SAFETY: see the per-step comments. The stage always has room for
+            // a full word plus one vector of overhang beyond the flush
+            // threshold, and it is flushed after every word that crosses it.
             unsafe {
                 let mut dst = StreamOut::new(out.cast());
+                // The stage fill level lives in a local so that it stays in a
+                // register across the steps of a word.
+                let mut fill = dst.fill;
+                let stage = dst.stage.0.as_mut_ptr().cast::<u8>();
                 let mut count = 0usize;
                 let mut wi = 0;
-                while wi < n_words {
-                    let mut w = *mask.get_unchecked(wi);
-                    if wi >= full {
-                        // The partial last word: ignore bits past `n`.
-                        w &= (1u64 << (n % 64)) - 1;
-                    }
-                    if w != 0 {
-                        let pc = w.count_ones() as usize;
-                        if count + pc > out_cap {
-                            // Contract violation (more matches than room):
-                            // emit only what fits, one element at a time.
-                            while w != 0 && count < out_cap {
-                                let bit = w.trailing_zeros() as usize;
-                                dst.cursor().cast::<$elem>().write_unaligned(values.add(wi * 64 + bit).read());
-                                dst.fill += SIZE;
-                                count += 1;
-                                w &= w - 1;
+                'groups: while wi < n_words {
+                    let end = (wi + GROUP_WORDS).min(n_words);
+                    let ones: usize = mask.get_unchecked(wi..end).iter().map(|w| w.count_ones() as usize).sum();
+                    let steps = sparse_steps(ones, end - wi, $cost);
+                    macro_rules! sparse_run {
+                        ($k:literal) => {
+                            while wi < end.min(sparse_limit) {
+                                let w = *mask.get_unchecked(wi);
+                                let pc = w.count_ones() as usize;
+                                if pc > $k || count + pc > out_cap {
+                                    break;
+                                }
+                                sparse_word::<$elem, $k>(w, values.add(wi * 64), stage.add(fill).cast());
+                                fill += pc * SIZE;
+                                count += pc;
+                                wi += 1;
+                                if fill >= STAGE_BYTES {
+                                    dst.fill = fill;
+                                    dst.flush_lines();
+                                    fill = dst.fill;
+                                }
                             }
-                            break;
-                        }
-                        let base = values.add(wi * 64);
+                        };
+                    }
+                    match steps {
+                        4 => sparse_run!(4),
+                        8 => sparse_run!(8),
+                        12 => sparse_run!(12),
+                        _ => {}
+                    }
+                    while wi < end {
+                        let mut w = *mask.get_unchecked(wi);
                         if wi >= full {
-                            // Reading whole vectors here could run past `n`.
-                            while w != 0 {
-                                let bit = w.trailing_zeros() as usize;
-                                dst.cursor().cast::<$elem>().write_unaligned(base.add(bit).read());
-                                dst.fill += SIZE;
-                                w &= w - 1;
+                            // The partial last word: ignore bits past `n`.
+                            w &= (1u64 << (n % 64)) - 1;
+                        }
+                        if w != 0 {
+                            let pc = w.count_ones() as usize;
+                            let base = values.add(wi * 64);
+                            if count + pc > out_cap {
+                                // Contract violation (more matches than room):
+                                // emit only what fits, one element at a time.
+                                while w != 0 && count < out_cap {
+                                    let bit = w.trailing_zeros() as usize;
+                                    stage.add(fill).cast::<$elem>().write_unaligned(base.add(bit).read());
+                                    fill += SIZE;
+                                    count += 1;
+                                    w &= w - 1;
+                                }
+                                break 'groups;
                             }
-                        } else if w == u64::MAX {
-                            std::ptr::copy_nonoverlapping(base.cast::<u8>(), dst.cursor(), 64 * SIZE);
-                            dst.fill += 64 * SIZE;
-                        } else {
-                            // The stage has room for a full word plus one
-                            // vector of overhang beyond the flush threshold.
-                            let mut m = w;
-                            let mut k = 0;
-                            while k < $steps {
-                                let mb = (m & ((1u64 << $bits) - 1)) as usize;
-                                let v = _mm256_loadu_si256(base.add(k * $lanes).cast());
-                                let p = _mm256_load_si256(table.add(mb).cast());
-                                _mm256_storeu_si256(dst.cursor().cast(), _mm256_permutevar8x32_epi32(v, p));
-                                dst.fill += (mb as u32).count_ones() as usize * SIZE;
-                                m >>= $bits;
-                                k += 1;
+                            if wi >= full {
+                                // Reading whole vectors here could run past `n`.
+                                while w != 0 {
+                                    let bit = w.trailing_zeros() as usize;
+                                    stage.add(fill).cast::<$elem>().write_unaligned(base.add(bit).read());
+                                    fill += SIZE;
+                                    w &= w - 1;
+                                }
+                            } else if w == u64::MAX {
+                                std::ptr::copy_nonoverlapping(base.cast::<u8>(), stage.add(fill), 64 * SIZE);
+                                fill += 64 * SIZE;
+                            } else {
+                                // `fill` is a multiple of the element size
+                                // (the head skip is, too, as `out` is aligned).
+                                $dense(w, base, stage.add(fill).cast());
+                                fill += pc * SIZE;
+                            }
+                            count += pc;
+                            if fill >= STAGE_BYTES {
+                                dst.fill = fill;
+                                dst.flush_lines();
+                                fill = dst.fill;
                             }
                         }
-                        count += pc;
-                        if dst.fill >= STAGE_BYTES {
-                            dst.flush_lines();
-                        }
+                        wi += 1;
                     }
-                    wi += 1;
                 }
+                dst.fill = fill;
                 dst.finish();
                 count
             }
@@ -696,12 +824,49 @@ macro_rules! compact_stream_kernel {
 
 compact_stream_kernel!(
     /// Streaming compaction of 8-byte elements.
-    compact8_stream, u64, lanes = 4, steps = 16, bits = 4, table = PERM64
+    compact8_stream, u64, dense = dense_word8, dense_cost = 27
 );
 compact_stream_kernel!(
     /// Streaming compaction of 4-byte elements.
-    compact4_stream, u32, lanes = 8, steps = 8, bits = 8, table = PERM32
+    compact4_stream, u32, dense = dense_word4, dense_cost = 16
 );
+
+/// `out[j] = src[idx[j]]`, written with non-temporal stores through the
+/// staging buffer.
+///
+/// # Safety
+/// * Every index must be in bounds of `src`, and `T` at most 16 bytes wide.
+/// * `out` must be valid for `idx.len()` writes, aligned for `T`, and must not
+///   overlap `src`.
+/// * AVX2 must be available, and the calling thread must execute `SFENCE`
+///   before the output is read (see `pipeline::stream_fence`).
+#[target_feature(enable = "avx2")]
+pub unsafe fn gather_stream<T: Copy>(src: *const T, idx: &[u32], out: *mut T) {
+    /// Elements staged between two checks of the fill level.
+    const BATCH: usize = 32;
+    const { assert!(size_of::<T>() <= 16) };
+    let size = size_of::<T>();
+    // SAFETY: the stage is flushed whenever it holds `STAGE_BYTES`, and a
+    // batch adds at most `32 * 16` bytes, which its spare capacity covers.
+    unsafe {
+        let mut dst = StreamOut::new(out.cast());
+        let stage = dst.stage.0.as_mut_ptr().cast::<u8>();
+        let mut fill = dst.fill;
+        for batch in idx.chunks(BATCH) {
+            for &i in batch {
+                stage.add(fill).cast::<T>().write_unaligned(src.add(i as usize).read());
+                fill += size;
+            }
+            if fill >= STAGE_BYTES {
+                dst.fill = fill;
+                dst.flush_lines();
+                fill = dst.fill;
+            }
+        }
+        dst.fill = fill;
+        dst.finish();
+    }
+}
 
 /// Copy `n` bytes with non-temporal stores (for outputs that will not be
 /// read back soon and are larger than the cache).
@@ -885,7 +1050,7 @@ pub unsafe fn mask_indices(mask: &[u64], n: usize, base: u32, out: *mut u32) -> 
     unsafe {
         for wi in 0..n_words {
             let mut w = *mask.get_unchecked(wi);
-            if wi + 1 == n_words && n % 64 != 0 {
+            if wi + 1 == n_words && !n.is_multiple_of(64) {
                 w &= (1u64 << (n % 64)) - 1;
             }
             if w == 0 {

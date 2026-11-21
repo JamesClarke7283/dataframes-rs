@@ -277,10 +277,9 @@ impl<T: Pod> Buffer<T> {
     #[inline]
     pub fn get_mut(&mut self) -> Option<&mut [T]> {
         let writable = match &mut self.owner {
-            Some(owner) => match Arc::get_mut(owner) {
-                Some(Owner(Storage::Column { .. } | Storage::Global { .. })) => true,
-                _ => false,
-            },
+            Some(owner) => {
+                matches!(Arc::get_mut(owner), Some(Owner(Storage::Column { .. } | Storage::Global { .. })))
+            }
             None => self.len == 0,
         };
         // SAFETY: we hold `&mut self`, and the reference count proves no other

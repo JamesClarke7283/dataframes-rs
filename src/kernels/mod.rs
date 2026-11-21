@@ -34,13 +34,12 @@ pub mod par;
 pub mod pipeline;
 pub mod scalar;
 pub mod tables;
+pub mod team;
 #[cfg(target_arch = "x86_64")]
 pub mod x86;
 
 use std::cmp::Ordering as CmpOrdering;
-use std::sync::atomic::{AtomicU8, Ordering};
-
-use rayon::prelude::*;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use crate::memory::bitmap::count_ones_range;
 use crate::memory::{APRON, AlignedVec, ColumnAlloc, Pod, words_for, zeroed_vec};
@@ -256,6 +255,7 @@ macro_rules! impl_kernel_float {
                 if self.is_nan() { other.is_nan() } else { self == other }
             }
             #[inline(always)]
+            #[allow(clippy::neg_cmp_op_on_partial_ord)] // the NaN cases are the point
             fn tot_lt(self, other: Self) -> bool {
                 // `!(self >= other)` is true for NaN on either side; NaN is the
                 // maximum, so the result is true only when `self` is not NaN.
@@ -326,7 +326,7 @@ pub unsafe fn compact<T: Pod>(
                 (4, false) => return x86::compact4(values.cast(), mask, n, out.cast(), out_cap),
                 (2, _) => return x86::compact2(values.cast(), mask, n, out.cast(), out_cap),
                 (1, _) => return x86::compact1(values.cast(), mask, n, out.cast(), out_cap),
-                (16, _) if values as usize % 8 == 0 && out as usize % 8 == 0 => {
+                (16, _) if (values as usize).is_multiple_of(8) && (out as usize).is_multiple_of(8) => {
                     return compact16(values.cast(), mask, n, out.cast(), out_cap, stream);
                 }
                 _ => {}
@@ -432,6 +432,59 @@ pub fn mask_indices(mask: &[u64], n: usize, base: u32) -> AlignedVec<u32> {
     out
 }
 
+/// [`mask_indices`] into a caller-provided vector, which is cleared first.
+/// Lets a loop over blocks reuse one allocation.
+pub fn mask_indices_into(mask: &[u64], n: usize, base: u32, out: &mut Vec<u32>) {
+    assert!(mask.len() >= words_for(n), "mask too short for {n} rows");
+    assert!(n <= u32::MAX as usize - base as usize, "row indices must fit in 32 bits");
+    out.clear();
+    let count = count_ones_range(mask, 0, n);
+    #[cfg(target_arch = "x86_64")]
+    if level() >= Level::Avx2 {
+        // The vector kernel stores whole vectors: eight slots of overhang.
+        out.reserve(count + 8);
+        // SAFETY: room for `count + 8` writes was just reserved; AVX2 detected.
+        unsafe {
+            let written = x86::mask_indices(mask, n, base, out.as_mut_ptr());
+            debug_assert_eq!(written, count);
+            out.set_len(count);
+        }
+        return;
+    }
+    out.reserve(count);
+    for (wi, &word) in mask[..words_for(n)].iter().enumerate() {
+        let mut w = if wi + 1 == words_for(n) { word & crate::memory::tail_mask(n) } else { word };
+        while w != 0 {
+            out.push(base + (wi * 64) as u32 + w.trailing_zeros());
+            w &= w - 1;
+        }
+    }
+}
+
+/// `out[j] = src[idx[j]]` for every `j`.
+///
+/// With `stream` the output is written with non-temporal stores (see
+/// [`compact`] for when that pays and for the fence it requires).
+///
+/// # Safety
+/// * Every index must be in bounds of the allocation `src` points into.
+/// * `out` must be aligned for `T`, valid for `idx.len()` writes and must not
+///   overlap the source.
+#[inline]
+pub unsafe fn gather<T: Pod>(src: *const T, idx: &[u32], out: *mut T, stream: bool) {
+    #[cfg(target_arch = "x86_64")]
+    if stream && size_of::<T>() <= 16 && level() >= Level::Avx2 {
+        // SAFETY: forwarded; AVX2 was detected.
+        unsafe { x86::gather_stream(src, idx, out) };
+        return;
+    }
+    let _ = stream;
+    for (j, &i) in idx.iter().enumerate() {
+        // SAFETY: forwarded.
+        unsafe { out.add(j).write(src.add(i as usize).read()) };
+    }
+}
+
 /// Selections sparser than this are compacted through an index list
 /// ([`mask_indices`] + gather) instead of by the permute kernels.
 pub const SPARSE_SELECTIVITY: f64 = 0.125;
@@ -483,12 +536,14 @@ pub fn cmp_scalar_mask_with<T: Kernel>(
     let count = if tasks <= 1 || n < 128 {
         T::cmp_scalar(values, op, rhs, &mut words)
     } else {
-        let rows = par::rows_per_task(n, tasks);
-        values
-            .par_chunks(rows)
-            .zip(words.par_chunks_mut(rows / 64))
-            .map(|(v, w)| T::cmp_scalar(v, op, rhs, w))
-            .sum()
+        let rows = par::chunk_rows(n, size_of::<T>(), tasks);
+        let total = AtomicUsize::new(0);
+        par::for_each_chunk_mut(&mut words, rows / 64, tasks, |i, w| {
+            let start = i * rows;
+            let count = T::cmp_scalar(&values[start..(start + rows).min(n)], op, rhs, w);
+            total.fetch_add(count, Ordering::Relaxed);
+        });
+        total.into_inner()
     };
     (words, count)
 }
@@ -505,12 +560,14 @@ pub fn cmp_values_mask<T: Kernel>(lhs: &[T], rhs: &[T], op: CmpOp) -> (AlignedVe
     let count = if tasks <= 1 || n < 128 {
         T::cmp_values(lhs, rhs, op, &mut words)
     } else {
-        let rows = par::rows_per_task(n, tasks);
-        lhs.par_chunks(rows)
-            .zip(rhs.par_chunks(rows))
-            .zip(words.par_chunks_mut(rows / 64))
-            .map(|((a, b), w)| T::cmp_values(a, b, op, w))
-            .sum()
+        let rows = par::chunk_rows(n, 2 * size_of::<T>(), tasks);
+        let total = AtomicUsize::new(0);
+        par::for_each_chunk_mut(&mut words, rows / 64, tasks, |i, w| {
+            let range = i * rows..((i + 1) * rows).min(n);
+            let count = T::cmp_values(&lhs[range.clone()], &rhs[range], op, w);
+            total.fetch_add(count, Ordering::Relaxed);
+        });
+        total.into_inner()
     };
     (words, count)
 }
@@ -535,6 +592,9 @@ pub fn filter_by_mask_with<T: Pod>(
     let streaming = |count: usize| stream.unwrap_or(count * size_of::<T>() >= cache::stream_threshold());
     if tasks <= 1 || n < 128 {
         let count = count_ones_range(mask, 0, n);
+        if count == 0 {
+            return Vec::new_in(ColumnAlloc);
+        }
         if (count as f64) < SPARSE_SELECTIVITY * n as f64 && n <= u32::MAX as usize {
             // Sparse: list the selected rows, then gather only those.
             let idx = mask_indices(mask, n, 0);
@@ -561,7 +621,7 @@ pub fn filter_by_mask_with<T: Pod>(
         return out;
     }
 
-    let ranges = par::word_ranges(n, tasks);
+    let ranges = par::ranges(n, par::chunk_rows(n, size_of::<T>(), tasks));
     let mut offsets = Vec::with_capacity(ranges.len() + 1);
     let mut count = 0usize;
     for &(start, end) in &ranges {
@@ -569,12 +629,17 @@ pub fn filter_by_mask_with<T: Pod>(
         count += count_ones_range(mask, start, end - start);
     }
     offsets.push(count);
+    if count == 0 {
+        // Nothing selected. (An empty vector owns no block, hence no apron
+        // for the kernels to scribble on either.)
+        return Vec::new_in(ColumnAlloc);
+    }
     let stream = streaming(count);
     let mut out: AlignedVec<T> = Vec::with_capacity_in(count, ColumnAlloc);
     let dst = par::SendPtr(out.as_mut_ptr());
     let last = ranges.len() - 1;
-    ranges.par_iter().enumerate().for_each(|(i, &(start, end))| {
-        let dst = dst;
+    par::run(ranges.len(), tasks, |i| {
+        let (start, end) = ranges[i];
         let exact = offsets[i + 1] - offsets[i];
         // Only the final range may spill into the apron; the others must stay
         // inside their own slot or they would race with their neighbour.
@@ -588,7 +653,7 @@ pub fn filter_by_mask_with<T: Pod>(
                 values.as_ptr().add(start),
                 &mask[start / 64..],
                 end - start,
-                dst.0.add(offsets[i]),
+                dst.get().add(offsets[i]),
                 cap,
                 stream,
             );
@@ -661,11 +726,17 @@ pub fn count_cmp_scalar<T: Kernel>(values: &[T], op: CmpOp, rhs: T) -> usize {
         let mut words = [0u64; BLOCK_ROWS / 64];
         v.chunks(BLOCK_ROWS).map(|b| T::cmp_scalar(b, op, rhs, &mut words)).sum()
     };
-    let tasks = par::tasks_for(values.len(), size_of::<T>());
+    let n = values.len();
+    let tasks = par::tasks_for(n, size_of::<T>());
     if tasks <= 1 {
         return serial(values);
     }
-    values.par_chunks(par::rows_per_task(values.len(), tasks)).map(serial).sum()
+    let rows = par::chunk_rows(n, size_of::<T>(), tasks);
+    let total = AtomicUsize::new(0);
+    par::run(n.div_ceil(rows), tasks, |i| {
+        total.fetch_add(serial(&values[i * rows..((i + 1) * rows).min(n)]), Ordering::Relaxed);
+    });
+    total.into_inner()
 }
 
 /// Guess the number of matches from 16 evenly spaced 64-row stripes, padded so

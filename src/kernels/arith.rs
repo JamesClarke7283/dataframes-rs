@@ -7,8 +7,6 @@
 
 use std::mem::MaybeUninit;
 
-use rayon::prelude::*;
-
 use super::{Level, level, par};
 use crate::memory::{AlignedVec, ColumnAlloc, Pod};
 
@@ -59,8 +57,9 @@ pub fn unary<T: Pod, U: Pod>(values: &[T], f: impl Fn(T) -> U + Sync) -> Aligned
             || map_slice(values, dst, &f),
         );
     } else {
-        let rows = par::rows_per_task(n, tasks);
-        values.par_chunks(rows).zip(dst.par_chunks_mut(rows)).for_each(|(s, d)| {
+        let rows = par::chunk_rows(n, size_of::<T>().max(size_of::<U>()), tasks);
+        par::for_each_chunk_mut(dst, rows, tasks, |i, d| {
+            let s = &values[i * rows..i * rows + d.len()];
             with_simd(
                 #[inline(always)]
                 || map_slice(s, d, &f),
@@ -88,8 +87,10 @@ pub fn binary<A: Pod, B: Pod, U: Pod>(a: &[A], b: &[B], f: impl Fn(A, B) -> U + 
             || map_slice2(a, b, dst, &f),
         );
     } else {
-        let rows = par::rows_per_task(n, tasks);
-        a.par_chunks(rows).zip(b.par_chunks(rows)).zip(dst.par_chunks_mut(rows)).for_each(|((x, y), d)| {
+        let rows = par::chunk_rows(n, size_of::<A>() + size_of::<B>(), tasks);
+        par::for_each_chunk_mut(dst, rows, tasks, |i, d| {
+            let range = i * rows..i * rows + d.len();
+            let (x, y) = (&a[range.clone()], &b[range]);
             with_simd(
                 #[inline(always)]
                 || map_slice2(x, y, d, &f),
@@ -120,8 +121,8 @@ pub fn unary_in_place<T: Pod>(values: &mut [T], f: impl Fn(T) -> T + Sync) {
             || run(values, &f),
         );
     } else {
-        let rows = par::rows_per_task(n, tasks);
-        values.par_chunks_mut(rows).for_each(|chunk| {
+        let rows = par::chunk_rows(n, size_of::<T>(), tasks);
+        par::for_each_chunk_mut(values, rows, tasks, |_, chunk| {
             with_simd(
                 #[inline(always)]
                 || run(chunk, &f),

@@ -32,12 +32,12 @@ impl BooleanChunked {
         if let Some(v) = &validity {
             assert_eq!(v.len(), values.len(), "validity and values must have equal length");
         }
-        BooleanChunked { name: name.into(), values, validity: normalize_validity(validity) }
+        BooleanChunked { name, values, validity: normalize_validity(validity) }
     }
 
     /// Build from a slice of `bool`.
     pub fn from_slice(name: PlSmallStr, values: &[bool]) -> Self {
-        BooleanChunked { name: name.into(), values: Bitmap::from_bools(values), validity: None }
+        BooleanChunked { name, values: Bitmap::from_bools(values), validity: None }
     }
 
     /// Build from optional values; `None` becomes null.
@@ -47,7 +47,7 @@ impl BooleanChunked {
 
     /// Collect an iterator of values (no nulls).
     pub fn from_iter_values(name: PlSmallStr, iter: impl IntoIterator<Item = bool>) -> Self {
-        BooleanChunked { name: name.into(), values: iter.into_iter().collect(), validity: None }
+        BooleanChunked { name, values: iter.into_iter().collect(), validity: None }
     }
 
     /// Collect an iterator of optional values.
@@ -62,13 +62,13 @@ impl BooleanChunked {
 
     /// `len` copies of `value`.
     pub fn full(name: PlSmallStr, value: bool, len: usize) -> Self {
-        BooleanChunked { name: name.into(), values: Bitmap::new_constant(value, len), validity: None }
+        BooleanChunked { name, values: Bitmap::new_constant(value, len), validity: None }
     }
 
     /// `len` nulls.
     pub fn full_null(name: PlSmallStr, len: usize) -> Self {
         BooleanChunked {
-            name: name.into(),
+            name,
             values: Bitmap::new_zeroed(len),
             validity: (len > 0).then(|| Bitmap::new_zeroed(len)),
         }
@@ -76,7 +76,7 @@ impl BooleanChunked {
 
     /// An empty column.
     pub fn new_empty(name: PlSmallStr) -> Self {
-        BooleanChunked { name: name.into(), values: Bitmap::new(), validity: None }
+        BooleanChunked { name, values: Bitmap::new(), validity: None }
     }
 
     /// Column name.
@@ -88,13 +88,13 @@ impl BooleanChunked {
     /// Rename in place.
     #[inline]
     pub fn rename(&mut self, name: PlSmallStr) {
-        self.name = name.into();
+        self.name = name;
     }
 
     /// Rename, by value.
     #[inline]
     pub fn with_name(mut self, name: PlSmallStr) -> Self {
-        self.name = name.into();
+        self.name = name;
         self
     }
 

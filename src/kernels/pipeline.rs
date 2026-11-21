@@ -67,6 +67,16 @@ pub fn block_rows(row_bytes: usize) -> usize {
     (rows / 64 * 64).clamp(1024, MAX_BLOCK_ROWS)
 }
 
+/// Rows per block when several columns are compacted by one mask.
+///
+/// Most of those columns are not part of the predicate, so nothing is gained
+/// by keeping a block cache-resident between scan and emit. What matters is
+/// that each column of a block is a long sequential run for the hardware
+/// prefetchers, and that every thread still gets a handful of blocks.
+pub fn frame_block_rows(rows: usize, tasks: usize) -> usize {
+    (rows / (4 * tasks.max(1)) / 64 * 64).clamp(1024, MAX_BLOCK_ROWS)
+}
+
 /// Upper bound of [`block_rows`]; scratch masks are sized for it.
 pub const MAX_BLOCK_ROWS: usize = 65_536;
 
@@ -155,12 +165,9 @@ where
     if tasks <= 1 || n_blocks <= 1 {
         worker();
     } else {
-        let worker = &worker;
-        rayon::scope(|s| {
-            for _ in 0..tasks.min(n_blocks) {
-                s.spawn(move |_| worker());
-            }
-        });
+        // One loop per thread; a thread that never shows up claims no block.
+        let workers = tasks.min(n_blocks);
+        par::run(workers, workers, |_| worker());
     }
     Committed {
         total: shared.offset.load(Ordering::Relaxed),
@@ -233,14 +240,13 @@ pub fn filter_fused<T: Kernel>(
         || FenceOnDrop { words: vec![0u64; block / 64], stream },
         |range, scratch| T::cmp_scalar(&values[range], op, rhs, &mut scratch.words),
         |range, scratch, offset, count| {
-            let dst = dst;
             let rows = &values[range];
             // SAFETY: the pipeline hands out disjoint `offset..offset + count`
             // intervals that lie below `capacity`; `compact` is told to write
             // at most `count` elements, and `scratch.words` is the mask `scan`
             // just produced for exactly these rows.
             unsafe {
-                let written = compact(rows.as_ptr(), &scratch.words, rows.len(), dst.0.add(offset), count, stream);
+                let written = compact(rows.as_ptr(), &scratch.words, rows.len(), dst.get().add(offset), count, stream);
                 debug_assert_eq!(written, count);
             }
         },

@@ -30,6 +30,7 @@ impl PlSmallStr {
 
     /// Build from a string slice (copies; inline when it fits).
     #[inline]
+    #[allow(clippy::should_implement_trait)] // the name Polars uses; infallible, unlike `FromStr`
     pub fn from_str(s: &str) -> Self {
         if s.len() <= INLINE_CAP {
             let mut buf = [0u8; INLINE_CAP];

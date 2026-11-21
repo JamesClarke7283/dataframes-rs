@@ -322,6 +322,45 @@ fn mask_indices_match_model() {
 }
 
 #[test]
+fn index_lists_and_gathers_match_model() {
+    let mut rng = Rng::new(61);
+    let mut reused = Vec::new();
+    for &n in LENGTHS {
+        let values: Vec<u64> = (0..n as u64).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15)).collect();
+        let wide: Vec<u128> = values.iter().map(|&v| (v as u128) << 64 | !v as u128).collect();
+        let narrow: Vec<u32> = values.iter().map(|&v| v as u32).collect();
+        for density in [0, 1, 10, 40, 100] {
+            let bools = random_mask(&mut rng, n, density, false);
+            let mask = mask_from(&bools);
+            let want_idx: Vec<u32> = (0..n as u32).filter(|&i| bools[i as usize]).collect();
+            mask_indices_into(&mask, n, 0, &mut reused);
+            assert_eq!(reused, want_idx, "n {n} density {density}");
+            mask_indices_into(&mask, n, 1000, &mut reused);
+            assert!(reused.iter().zip(&want_idx).all(|(&got, &i)| got == i + 1000));
+
+            fn check<T: Pod + PartialEq + std::fmt::Debug>(src: &[T], idx: &[u32], sentinel: T) {
+                let want: Vec<T> = idx.iter().map(|&i| src[i as usize]).collect();
+                for stream in [false, true] {
+                    // Unaligned starts exercise the head and tail of the staged writer.
+                    for shift in [0usize, 1, 5] {
+                        let mut out = vec![sentinel; shift + idx.len() + 9];
+                        // SAFETY: indices are in bounds; `idx.len()` slots follow `shift`.
+                        unsafe { gather(src.as_ptr(), idx, out.as_mut_ptr().add(shift), stream) };
+                        pipeline::stream_fence();
+                        assert_eq!(&out[shift..shift + idx.len()], &want[..], "stream {stream} shift {shift}");
+                        assert!(out[..shift].iter().all(|v| *v == sentinel), "wrote before the output");
+                        assert!(out[shift + idx.len()..].iter().all(|v| *v == sentinel), "wrote after the output");
+                    }
+                }
+            }
+            check(&values, &want_idx, 0xDEAD_BEEF_u64);
+            check(&narrow, &want_idx, 0xDEAD_BEEF_u32);
+            check(&wide, &want_idx, 0xDEAD_BEEF_u128);
+        }
+    }
+}
+
+#[test]
 fn sparse_selection_goes_through_indices_and_agrees() {
     let n = 200_000;
     let values: Vec<f64> = (0..n).map(|i| i as f64 * 0.25).collect();

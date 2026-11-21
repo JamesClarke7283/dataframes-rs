@@ -75,6 +75,8 @@
 //! operator, length class and mask density.
 
 #![warn(missing_docs)]
+// The kernels' loop shapes are the ones LLVM vectorises best; keep them.
+#![allow(clippy::chunks_exact_to_as_chunks)]
 
 pub mod chunked_array;
 pub mod datatypes;

@@ -112,13 +112,13 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
         if let Some(v) = &validity {
             assert_eq!(v.len(), values.len(), "validity and values must have equal length");
         }
-        ChunkedArray { name: name.into(), values, validity: normalize_validity(validity) }
+        ChunkedArray { name, values, validity: normalize_validity(validity) }
     }
 
     /// Freeze a column vector. O(1).
     #[inline]
     pub fn from_aligned(name: PlSmallStr, values: AlignedVec<T::Native>) -> Self {
-        ChunkedArray { name: name.into(), values: Buffer::from_aligned(values), validity: None }
+        ChunkedArray { name, values: Buffer::from_aligned(values), validity: None }
     }
 
     /// Adopt a `Vec` without copying it.
@@ -128,7 +128,7 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
     /// huge-page-backed column storage instead.
     #[inline]
     pub fn from_vec(name: PlSmallStr, values: Vec<T::Native>) -> Self {
-        ChunkedArray { name: name.into(), values: Buffer::from_vec(values), validity: None }
+        ChunkedArray { name, values: Buffer::from_vec(values), validity: None }
     }
 
     /// Polars alias of [`from_vec`](Self::from_vec).
@@ -144,7 +144,7 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
 
     /// Copy a slice into column storage.
     pub fn from_slice(name: PlSmallStr, values: &[T::Native]) -> Self {
-        ChunkedArray { name: name.into(), values: Buffer::from_slice(values), validity: None }
+        ChunkedArray { name, values: Buffer::from_slice(values), validity: None }
     }
 
     /// Build from optional values; `None` becomes null.
@@ -154,7 +154,7 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
 
     /// Collect an iterator of values (no nulls).
     pub fn from_iter_values(name: PlSmallStr, iter: impl IntoIterator<Item = T::Native>) -> Self {
-        ChunkedArray { name: name.into(), values: iter.into_iter().collect(), validity: None }
+        ChunkedArray { name, values: iter.into_iter().collect(), validity: None }
     }
 
     /// Collect an iterator of optional values.
@@ -186,7 +186,7 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
 
     /// An empty column.
     pub fn new_empty(name: PlSmallStr) -> Self {
-        ChunkedArray { name: name.into(), values: Buffer::new(), validity: None }
+        ChunkedArray { name, values: Buffer::new(), validity: None }
     }
 
     // ----- metadata ---------------------------------------------------------
@@ -200,13 +200,13 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
     /// Rename in place.
     #[inline]
     pub fn rename(&mut self, name: PlSmallStr) {
-        self.name = name.into();
+        self.name = name;
     }
 
     /// Rename, by value.
     #[inline]
     pub fn with_name(mut self, name: PlSmallStr) -> Self {
-        self.name = name.into();
+        self.name = name;
         self
     }
 

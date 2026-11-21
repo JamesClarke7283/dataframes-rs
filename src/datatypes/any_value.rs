@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn total_order_puts_nulls_first_and_nan_last() {
-        let mut v = vec![AnyValue::Float64(f64::NAN), AnyValue::Int64(3), AnyValue::Null, AnyValue::Float64(-1.5), AnyValue::String("a")];
+        let mut v = [AnyValue::Float64(f64::NAN), AnyValue::Int64(3), AnyValue::Null, AnyValue::Float64(-1.5), AnyValue::String("a")];
         v.sort_by(|a, b| a.total_cmp(b));
         assert!(v[0].is_null());
         assert_eq!(v[1], AnyValue::Float64(-1.5));

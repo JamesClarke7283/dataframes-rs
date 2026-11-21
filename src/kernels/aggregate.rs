@@ -8,7 +8,6 @@
 //! and at every vector width. As a bonus the lanes bound rounding error much
 //! like pairwise summation does.
 
-use rayon::prelude::*;
 
 use super::{Kernel, par, simd_dispatch};
 use crate::memory::tail_mask;
@@ -309,7 +308,7 @@ simd_dispatch!(fn max_serial<T: Num>(values: &[T]) -> T = max_impl);
 /// results are folded left to right. The piece size is a constant (not a
 /// function of the thread count), so a floating-point sum has the same value
 /// whether the pieces were computed by one core or by sixteen.
-pub const PIECE_ROWS: usize = 1 << 16;
+pub const PIECE_ROWS: usize = 1 << 14;
 
 #[inline]
 fn reduce_pieces<T: Num, R: Send>(
@@ -325,15 +324,24 @@ fn reduce_pieces<T: Num, R: Send>(
     if tasks <= 1 {
         return values.chunks(PIECE_ROWS).map(&map).fold(init, fold);
     }
-    // Every worker gets one contiguous run of whole pieces - a single
-    // sequential stream per physical core, which is what the hardware
-    // prefetchers and a shared memory bus want - and returns its per-piece
-    // results in order, so the fold below does not depend on the worker count.
-    let pieces = values.len().div_ceil(PIECE_ROWS);
-    let run = pieces.div_ceil(tasks) * PIECE_ROWS;
-    let parts: Vec<Vec<R>> =
-        values.par_chunks(run).map(|run| run.chunks(PIECE_ROWS).map(&map).collect()).collect();
-    parts.into_iter().flatten().fold(init, fold)
+    // The threads claim contiguous runs of whole pieces - long sequential
+    // streams, which is what the hardware prefetchers and a shared memory bus
+    // want - and store one result per piece. The fold below runs over the
+    // pieces in order, so it does not depend on who computed what.
+    let n = values.len();
+    let pieces = n.div_ceil(PIECE_ROWS);
+    let run = (par::chunk_rows(n, size_of::<T>(), tasks) / PIECE_ROWS).max(1);
+    let mut results: Vec<std::mem::MaybeUninit<R>> = Vec::with_capacity(pieces);
+    // SAFETY: `MaybeUninit` needs no initialisation.
+    unsafe { results.set_len(pieces) };
+    par::for_each_chunk_mut(&mut results, run, tasks, |chunk, slots| {
+        for (k, slot) in slots.iter_mut().enumerate() {
+            let start = (chunk * run + k) * PIECE_ROWS;
+            slot.write(map(&values[start..(start + PIECE_ROWS).min(n)]));
+        }
+    });
+    // SAFETY: every slot was written exactly once above.
+    results.into_iter().map(|r| unsafe { r.assume_init() }).fold(init, fold)
 }
 
 /// Sum of all elements. Integers wrap on overflow.

@@ -17,7 +17,6 @@ mod sort;
 use std::ops::Index;
 use std::sync::{Arc, OnceLock};
 
-use rayon::prelude::*;
 
 pub use group_by::{AggKind, GroupBy, Groups};
 pub(crate) use group_by::{aggregate, compute_groups};
@@ -653,24 +652,27 @@ impl DataFrame {
 
     // ----- rows: filter / take ------------------------------------------------
 
+    /// Threads to spread over the columns of this frame: 1 for a small or
+    /// single-column frame (whose kernels then split the rows instead).
+    fn column_threads(&self) -> usize {
+        if self.width() < 2 {
+            return 1;
+        }
+        par::tasks_for(self.height, self.row_bytes()).min(self.width())
+    }
+
     /// Apply `f` to every column, on several cores when the frame is large.
     pub(crate) fn map_columns(&self, f: impl Fn(&Column) -> Column + Send + Sync) -> Vec<Column> {
-        if self.width() > 1 && self.estimated_size() >= 2 * par::min_task_bytes() {
-            self.columns().par_iter().map(f).collect()
-        } else {
-            self.columns().iter().map(f).collect()
-        }
+        let columns = self.columns();
+        par::map(columns.len(), self.column_threads(), |i| f(&columns[i]))
     }
 
     pub(crate) fn try_map_columns(
         &self,
         f: impl Fn(&Column) -> PolarsResult<Column> + Send + Sync,
     ) -> PolarsResult<Vec<Column>> {
-        if self.width() > 1 && self.estimated_size() >= 2 * par::min_task_bytes() {
-            self.columns().par_iter().map(f).collect()
-        } else {
-            self.columns().iter().map(f).collect()
-        }
+        let columns = self.columns();
+        par::map(columns.len(), self.column_threads(), |i| f(&columns[i])).into_iter().collect()
     }
 
     /// Keep the rows selected by `predicate`: a boolean mask
@@ -723,6 +725,13 @@ impl DataFrame {
         if sel.is_none() {
             return self.clear();
         }
+        // Block-wise over all columns at once: every core compacts blocks of
+        // the whole row set into the shared outputs, through the mask or
+        // through a per-block index list, whichever is cheaper for the block.
+        if let Some(out) = crate::lazy::exec::filter_by_words(self, &sel.words, sel.count) {
+            return out;
+        }
+        // Nullable or bit-packed columns: column by column.
         if (sel.count as f64) < FRAME_SPARSE_SELECTIVITY * sel.len as f64 && sel.len <= IdxSize::MAX as usize {
             // Sparse selection: decode the mask into row indices once, then
             // every column only gathers the rows it keeps (instead of every
@@ -737,16 +746,15 @@ impl DataFrame {
         // the cache, no column's share of it will stay cached either.
         let stream = sel.count.saturating_mul(row_bytes) >= cache::stream_threshold();
         let budget = par::tasks_for(self.height, row_bytes);
-        if budget <= 1 || self.width() == 0 {
-            let columns = self.columns().iter().map(|c| c.filter_selection(sel, Some(1), Some(stream))).collect();
-            return DataFrame::from_parts(sel.count, columns);
-        }
-        // Spread the workers over the columns; a narrow frame splits each
-        // column into row ranges instead.
-        let per_column = budget.div_ceil(self.width()).max(1);
-        let columns =
-            self.columns().par_iter().map(|c| c.filter_selection(sel, Some(per_column), Some(stream))).collect();
-        DataFrame::from_parts(sel.count, columns)
+        let columns = self.columns();
+        let filtered = if budget > 1 && columns.len() >= budget {
+            // Enough columns to keep every thread busy with one each.
+            par::map(columns.len(), budget, |i| columns[i].filter_selection(sel, Some(1), Some(stream)))
+        } else {
+            // A narrow frame: one column after the other, each split by rows.
+            columns.iter().map(|c| c.filter_selection(sel, Some(budget), Some(stream))).collect()
+        };
+        DataFrame::from_parts(sel.count, filtered)
     }
 
     /// The rows at `indices`, in that order.
@@ -1116,6 +1124,44 @@ mod tests {
         assert!(out["c"].i32().unwrap().cont_slice().unwrap().iter().zip(&want).all(|(&v, &i)| v == c[i]));
         assert!(out["s"].str().unwrap().into_no_null_iter().zip(&want).all(|(v, &i)| v == s[i]));
         assert_eq!(df.filter_seq(&mask).unwrap(), out);
+    }
+
+    #[test]
+    fn filters_agree_with_a_row_by_row_model_at_every_density() {
+        use crate::lazy::{IntoLazy, col, lit};
+        // Heights below, around and above the block and parallel thresholds;
+        // densities on both sides of every strategy switch (skip, index list,
+        // permutation tables, copy).
+        for &n in &[0usize, 1, 63, 1000, 70_001, 300_000] {
+            let key: Vec<i64> = (0..n as i64).map(|i| (i * 7919 + 13) % 1000).collect();
+            let b: Vec<f64> = key.iter().map(|&v| v as f64 * 0.5).collect();
+            let c: Vec<i32> = key.iter().map(|&v| v as i32 - 500).collect();
+            let d: Vec<u8> = key.iter().map(|&v| v as u8).collect();
+            let s: Vec<String> = key.iter().map(|v| if v % 3 == 0 { format!("k{v}") } else { format!("key-{v}-long-enough-to-leave-the-view") }).collect();
+            let plain = df!("key" => &key, "b" => &b, "c" => &c, "d" => &d, "s" => &s).unwrap();
+            // The same frame with a nullable column takes the column-wise path.
+            let nullable: Vec<Option<i64>> = key.iter().map(|&v| (v % 7 != 0).then_some(v)).collect();
+            let mut with_nulls = plain.clone();
+            with_nulls.with_column(Series::new("n".into(), nullable.as_slice())).unwrap();
+            for threshold in [0i64, 1, 10, 100, 390, 410, 500, 900, 999, 1000] {
+                let want: Vec<usize> = (0..n).filter(|&i| key[i] < threshold).collect();
+                let mask = plain["key"].lt(threshold).unwrap();
+                let lazy = plain.clone().lazy().filter(col("key").lt(lit(threshold))).collect().unwrap();
+                for (label, out) in [("eager", plain.filter(&mask).unwrap()), ("lazy", lazy), ("nullable", with_nulls.filter(&mask).unwrap())] {
+                    let ctx = format!("{label} n {n} threshold {threshold}");
+                    assert_eq!(out.height(), want.len(), "{ctx}");
+                    assert!(out["key"].i64().unwrap().cont_slice().unwrap().iter().zip(&want).all(|(&v, &i)| v == key[i]), "{ctx}");
+                    assert!(out["b"].f64().unwrap().cont_slice().unwrap().iter().zip(&want).all(|(&v, &i)| v == b[i]), "{ctx}");
+                    assert!(out["c"].i32().unwrap().cont_slice().unwrap().iter().zip(&want).all(|(&v, &i)| v == c[i]), "{ctx}");
+                    assert!(out["d"].u8().unwrap().cont_slice().unwrap().iter().zip(&want).all(|(&v, &i)| v == d[i]), "{ctx}");
+                    assert!(out["s"].str().unwrap().into_no_null_iter().zip(&want).all(|(v, &i)| v == s[i]), "{ctx}");
+                    if label == "nullable" {
+                        let got: Vec<Option<i64>> = out["n"].i64().unwrap().iter().collect();
+                        assert!(got.iter().zip(&want).all(|(v, &i)| *v == nullable[i]), "{ctx}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

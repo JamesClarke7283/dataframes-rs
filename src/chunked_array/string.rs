@@ -130,7 +130,7 @@ impl StringChunkedBuilder {
     /// A builder expecting about `capacity` rows.
     pub fn new(name: PlSmallStr, capacity: usize) -> Self {
         StringChunkedBuilder {
-            name: name.into(),
+            name,
             views: Vec::with_capacity_in(capacity, ColumnAlloc),
             data: Vec::new_in(ColumnAlloc),
             done: Vec::new(),
@@ -228,7 +228,7 @@ impl StringChunked {
         let one = Self::from_slice(PlSmallStr::EMPTY, &[value]);
         let mut views: AlignedVec<View> = Vec::with_capacity_in(len, ColumnAlloc);
         views.resize(len, one.views[0]);
-        StringChunked { name: name.into(), views: views.into(), buffers: one.buffers, validity: None }
+        StringChunked { name, views: views.into(), buffers: one.buffers, validity: None }
     }
 
     /// `len` nulls.
@@ -238,7 +238,7 @@ impl StringChunked {
 
     /// An empty column.
     pub fn new_empty(name: PlSmallStr) -> Self {
-        StringChunked { name: name.into(), views: Buffer::new(), buffers: Arc::from(Vec::new()), validity: None }
+        StringChunked { name, views: Buffer::new(), buffers: Arc::from(Vec::new()), validity: None }
     }
 
     /// Column name.
@@ -250,13 +250,13 @@ impl StringChunked {
     /// Rename in place.
     #[inline]
     pub fn rename(&mut self, name: PlSmallStr) {
-        self.name = name.into();
+        self.name = name;
     }
 
     /// Rename, by value.
     #[inline]
     pub fn with_name(mut self, name: PlSmallStr) -> Self {
-        self.name = name.into();
+        self.name = name;
         self
     }
 

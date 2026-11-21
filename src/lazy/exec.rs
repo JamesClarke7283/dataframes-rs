@@ -18,7 +18,6 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use rayon::prelude::*;
 
 use super::dsl::{Expr, LiteralValue, Operator};
 use super::eval::eval_mask;
@@ -278,6 +277,8 @@ pub(crate) struct Predicate<'a> {
 pub(crate) struct Scratch {
     /// The mask of the current block.
     pub(crate) words: Vec<u64>,
+    /// Row indices of the current block, when it is emitted through a list.
+    idx: Vec<u32>,
     stack: Vec<Vec<u64>>,
     /// Fences this worker's non-temporal stores when it finishes.
     _fence: FenceOnDrop,
@@ -302,6 +303,7 @@ impl<'a> Predicate<'a> {
         let nw = words_for(block_rows);
         Scratch {
             words: vec![0; nw],
+            idx: Vec::new(),
             stack: vec![vec![0; nw]; self.depth],
             _fence: FenceOnDrop { words: Vec::new(), stream },
         }
@@ -330,18 +332,13 @@ impl<'a> Predicate<'a> {
     pub(crate) fn full_mask(&self, height: usize, tasks: usize) -> AlignedVec<u64> {
         let block = pipeline::block_rows(8);
         let mut words: AlignedVec<u64> = crate::memory::zeroed_vec(words_for(height));
-        let run = |(i, out): (usize, &mut [u64])| {
+        par::for_each_chunk_mut(&mut words, block / 64, tasks, |i, out| {
             let mut scratch = self.scratch(block, false);
             let start = i * block;
             self.eval(start..(start + block).min(height), &mut scratch);
             let n = out.len();
             out.copy_from_slice(&scratch.words[..n]);
-        };
-        if tasks > 1 {
-            words.par_chunks_mut(block / 64).enumerate().for_each(run);
-        } else {
-            words.chunks_mut(block / 64).enumerate().for_each(run);
-        }
+        });
         words
     }
 }
@@ -354,6 +351,8 @@ impl<'a> Predicate<'a> {
 trait Sink: Sync {
     /// Compact the block `rows` (mask in `mask`) to output rows `offset..offset + count`.
     fn emit(&self, rows: Range<usize>, mask: &[u64], offset: usize, count: usize, stream: bool);
+    /// Copy rows `start + idx[j]` to output rows `offset + j`.
+    fn emit_indices(&self, start: usize, idx: &[u32], offset: usize, stream: bool);
     /// Fix the output length and wrap it up.
     fn finish(self: Box<Self>, total: usize) -> Series;
 }
@@ -376,6 +375,14 @@ impl<T: crate::memory::Pod, F: Fn(AlignedVec<T>) -> Series + Sync> Sink for PodS
             let written = kernels::compact(src.as_ptr(), mask, src.len(), self.dst.0.add(offset), count, stream);
             debug_assert_eq!(written, count);
         }
+    }
+
+    #[inline]
+    fn emit_indices(&self, start: usize, idx: &[u32], offset: usize, stream: bool) {
+        // SAFETY: the indices are positions of set bits within the block that
+        // starts at row `start`, so every source row is in bounds; the output
+        // range is this block's own, as in `emit`.
+        unsafe { kernels::gather(self.src.as_ptr().add(start), idx, self.dst.0.add(offset), stream) }
     }
 
     fn finish(mut self: Box<Self>, total: usize) -> Series {
@@ -421,6 +428,64 @@ fn sink_for<'a>(column: &'a Column, capacity: usize) -> Option<Box<dyn Sink + 'a
     })
 }
 
+/// Write one block of every output column.
+///
+/// A block in which at most two rows in five survive is emitted through a
+/// list of row indices when there are several columns: the list is built once
+/// and each column then touches only the rows it keeps, which is cheaper than
+/// decoding the mask again per column.
+#[inline]
+fn emit_block(
+    sinks: &[Box<dyn Sink + '_>],
+    rows: Range<usize>,
+    mask: &[u64],
+    offset: usize,
+    count: usize,
+    stream: bool,
+    idx: &mut Vec<u32>,
+) {
+    if sinks.len() >= 2 && 5 * count <= 2 * rows.len() {
+        kernels::mask_indices_into(mask, rows.len(), 0, idx);
+        for sink in sinks {
+            sink.emit_indices(rows.start, idx, offset, stream);
+        }
+    } else {
+        for sink in sinks {
+            sink.emit(rows.clone(), mask, offset, count, stream);
+        }
+    }
+}
+
+/// The rows of `df` whose bit is set in `words` (`count` of them), compacted
+/// block by block over all columns at once. `None` if some column cannot be
+/// written by independent blocks (nullable or bit-packed columns).
+pub(crate) fn filter_by_words(df: &DataFrame, words: &[u64], count: usize) -> Option<DataFrame> {
+    let height = df.height();
+    if df.width() == 0 || height == 0 {
+        return None;
+    }
+    let row_bytes = df.row_bytes();
+    let stream = count.saturating_mul(row_bytes) >= cache::stream_threshold();
+    let sinks: Vec<Box<dyn Sink + '_>> = df.columns().iter().map(|c| sink_for(c, count)).collect::<Option<_>>()?;
+    let tasks = par::tasks_for(height, row_bytes);
+    let block = pipeline::frame_block_rows(height, tasks);
+    let done = pipeline::scan_then_emit(
+        height,
+        block,
+        tasks,
+        count,
+        || (Vec::new(), FenceOnDrop { words: Vec::new(), stream }),
+        |rows, _| crate::memory::bitmap::count_ones_range(words, rows.start, rows.len()),
+        |rows, scratch, offset, n| {
+            let mask = &words[rows.start / 64..];
+            emit_block(&sinks, rows, mask, offset, n, stream, &mut scratch.0);
+        },
+    );
+    debug_assert!(done.complete && done.total == count);
+    let columns = sinks.into_iter().map(|s| s.finish(done.total)).collect();
+    Some(DataFrame::from_parts(done.total, columns))
+}
+
 /// The rows of `df` satisfying `predicate`, restricted to `projection` (all
 /// columns if `None`).
 pub(crate) fn filter_frame(df: &DataFrame, predicate: &Expr, projection: Option<&[PlSmallStr]>) -> PolarsResult<DataFrame> {
@@ -454,7 +519,7 @@ pub(crate) fn filter_frame(df: &DataFrame, predicate: &Expr, projection: Option<
     };
 
     // Estimate the output size, then try the single-pass pipeline.
-    let block = pipeline::block_rows(row_bytes);
+    let block = pipeline::frame_block_rows(height, tasks);
     let p = compiled.sample_selectivity(height);
     let margin = 4.0 * 0.5 / 4096f64.sqrt();
     let capacity = ((((p + margin) * height as f64) as usize).saturating_add(block)).min(height);
@@ -473,9 +538,8 @@ pub(crate) fn filter_frame(df: &DataFrame, predicate: &Expr, projection: Option<
         || compiled.scratch(block, stream),
         |rows, scratch| compiled.eval(rows, scratch),
         |rows, scratch, offset, count| {
-            for sink in &sinks {
-                sink.emit(rows.clone(), &scratch.words, offset, count, stream);
-            }
+            let Scratch { words, idx, .. } = scratch;
+            emit_block(&sinks, rows, words, offset, count, stream, idx);
         },
     );
     if !done.complete {
@@ -536,11 +600,9 @@ fn reducer_for<'a, T: PolarsNumericType>(ca: &'a ChunkedArray<T>, kind: AggKind)
                 p.sum_f = p.sum_i as f64;
             }
         }
-        if need_min_max {
-            if let Some((lo, hi)) = kernels::aggregate::min_max(selected) {
-                (p.min, p.max) = (lo.to_f64(), hi.to_f64());
-                (p.min_i, p.max_i) = (lo.to_i64(), hi.to_i64());
-            }
+        if need_min_max && let Some((lo, hi)) = kernels::aggregate::min_max(selected) {
+            (p.min, p.max) = (lo.to_f64(), hi.to_f64());
+            (p.min_i, p.max_i) = (lo.to_i64(), hi.to_i64());
         }
         p
     };
@@ -633,15 +695,14 @@ pub(crate) fn aggregate_filtered(df: &DataFrame, predicate: &Expr, aggs: &[Expr]
             })
             .collect()
     };
-    let per_block: Vec<Vec<Partial>> = if tasks > 1 {
-        (0..n_blocks)
-            .into_par_iter()
-            .map_init(|| (compiled.scratch(block, false), Vec::new()), |(scratch, buf), b| run_block(b, scratch, buf))
-            .collect()
-    } else {
+    // The threads claim runs of consecutive blocks; each run brings its own
+    // scratch space and returns its blocks' partials in order.
+    let run_len = n_blocks.div_ceil((tasks * 4).max(1)).max(1);
+    let per_run: Vec<Vec<Vec<Partial>>> = par::map(n_blocks.div_ceil(run_len), tasks, |r| {
         let (mut scratch, mut buf) = (compiled.scratch(block, false), Vec::new());
-        (0..n_blocks).map(|b| run_block(b, &mut scratch, &mut buf)).collect()
-    };
+        (r * run_len..((r + 1) * run_len).min(n_blocks)).map(|b| run_block(b, &mut scratch, &mut buf)).collect()
+    });
+    let per_block: Vec<Vec<Partial>> = per_run.into_iter().flatten().collect();
     let totals: Vec<Partial> = (0..plans.len())
         .map(|i| per_block.iter().fold(Partial::EMPTY, |acc, parts| acc.merge(parts[i])))
         .collect();

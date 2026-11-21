@@ -738,7 +738,7 @@ mod tests {
     fn eager_expression_helpers_and_explain() {
         let df = sample();
         assert_eq!(df.filter(col("v").gt(4.0)).unwrap().height(), 2);
-        assert_eq!(df.filter(&col("v").gt(4.0)).unwrap().height(), 2);
+        assert_eq!(df.filter(col("v").gt(4.0)).unwrap().height(), 2);
         assert_eq!(df.filter(&df["v"].gt(4.0).unwrap()).unwrap().height(), 2);
         assert_eq!(df.select_exprs([col("v").sum()]).unwrap()["v"].f64().unwrap().get(0), Some(21.0));
         assert_eq!(df.with_columns([(col("v") + 1).alias("w")]).unwrap().width(), 4);

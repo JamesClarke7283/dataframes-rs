@@ -601,7 +601,7 @@ mod tests {
         let mut last = 0;
         for need in (HUGE_BLOCK..(1 << 30)).step_by(777_777) {
             let c = huge_class(need).unwrap();
-            assert!(c >= need && c % HUGE_BLOCK == 0);
+            assert!(c >= need && c.is_multiple_of(HUGE_BLOCK));
             assert!(c <= need + need / 4 + HUGE_BLOCK, "need {need} class {c}");
             assert!(c >= last);
             last = c;

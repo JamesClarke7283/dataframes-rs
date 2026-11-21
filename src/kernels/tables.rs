@@ -112,11 +112,11 @@ mod tests {
                 assert_eq!(SHUF16.0[m][2 * k + 1] as u32, 2 * i + 1);
             }
         }
-        for m in 0..16usize {
+        for (m, entry) in PERM64.0.iter().enumerate() {
             let want: Vec<u32> = (0..4).filter(|i| m >> i & 1 == 1).collect();
             for (k, &i) in want.iter().enumerate() {
-                assert_eq!(PERM64.0[m][2 * k], 2 * i);
-                assert_eq!(PERM64.0[m][2 * k + 1], 2 * i + 1);
+                assert_eq!(entry[2 * k], 2 * i);
+                assert_eq!(entry[2 * k + 1], 2 * i + 1);
             }
         }
     }

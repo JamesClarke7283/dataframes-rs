@@ -44,10 +44,9 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use rayon::prelude::*;
-
-use crate::error::PolarsResult;
+use crate::error::{PolarsError, PolarsResult};
 use crate::frame::DataFrame;
+use crate::kernels::par;
 use crate::series::Column;
 
 struct Version {
@@ -231,7 +230,17 @@ impl DataFrame {
         let names = self.get_column_names_owned();
         let backup = self.columns().to_vec();
         let columns = self.columns_mut();
-        let result: PolarsResult<()> = columns.par_iter_mut().try_for_each(&f);
+        // Each column goes to exactly one thread as `&mut`; the first error wins.
+        let failed: Mutex<Option<PolarsError>> = Mutex::new(None);
+        par::for_each_chunk_mut(columns, 1, par::threads(), |_, column| {
+            if let Err(e) = f(&mut column[0]) {
+                lock(&failed).get_or_insert(e);
+            }
+        });
+        let result: PolarsResult<()> = match failed.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            Some(e) => Err(e),
+            None => Ok(()),
+        };
         let consistent = columns.iter().zip(&names).all(|(c, n)| c.len() == height && c.name() == n);
         match (result, consistent) {
             (Ok(()), true) => Ok(()),
@@ -241,7 +250,7 @@ impl DataFrame {
             }
             (Ok(()), false) => {
                 *columns = backup;
-                Err(crate::error::PolarsError::ShapeMismatch(
+                Err(PolarsError::ShapeMismatch(
                     "a column changed its length or name during `par_apply_columns`".into(),
                 ))
             }
@@ -351,7 +360,7 @@ mod tests {
         assert_eq!(after.frame().height(), 4);
         // A failed write publishes nothing.
         let err = shared.try_write(|df| {
-            df.apply("a", |c| c * 0)?;
+            df.apply("a", |c| c * 7)?;
             df.column("missing").map(|_| ())
         });
         assert!(err.is_err());

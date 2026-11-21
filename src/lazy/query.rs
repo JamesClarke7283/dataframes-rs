@@ -135,11 +135,11 @@ impl Parser<'_> {
     }
 
     fn eat_op(&mut self, ops: &[&str]) -> Option<&'static str> {
-        if let Token::Op(op) = *self.peek() {
-            if ops.contains(&op) {
-                self.pos += 1;
-                return Some(op);
-            }
+        if let Token::Op(op) = *self.peek()
+            && ops.contains(&op)
+        {
+            self.pos += 1;
+            return Some(op);
         }
         None
     }

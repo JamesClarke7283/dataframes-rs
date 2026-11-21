@@ -15,7 +15,6 @@
 
 use std::borrow::Cow;
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::alloc::{AlignedVec, ColumnAlloc};
 use super::buffer::{Buffer, zeroed_vec};
@@ -60,15 +59,23 @@ pub struct Bitmap {
     /// Bit offset of the first bit inside `words[0]`; always below 64.
     offset: usize,
     len: usize,
-    /// Cached number of set bits, or `UNKNOWN`.
-    ones: AtomicUsize,
+    /// Number of set bits, or `UNKNOWN` (only for a large partial slice,
+    /// which counts when asked). A plain field on purpose: with no interior
+    /// mutability anywhere in a column, the compiler may treat a shared
+    /// reference to one as read-only and keep its pointer and length in
+    /// registers across calls it cannot see into.
+    ones: usize,
 }
+
+/// Slices of at most this many bits count their set bits right away (at most
+/// 64 `popcnt`s); longer ones leave the count to the first caller that wants it.
+const EAGER_COUNT_BITS: usize = 4096;
 
 impl Bitmap {
     /// An empty bitmap.
     #[inline]
     pub const fn new() -> Self {
-        Bitmap { words: Buffer::new(), offset: 0, len: 0, ones: AtomicUsize::new(0) }
+        Bitmap { words: Buffer::new(), offset: 0, len: 0, ones: 0 }
     }
 
     /// `len` bits, all clear.
@@ -77,7 +84,7 @@ impl Bitmap {
             words: Buffer::from_aligned(zeroed_vec(words_for(len))),
             offset: 0,
             len,
-            ones: AtomicUsize::new(0),
+            ones: 0,
         }
     }
 
@@ -88,7 +95,7 @@ impl Bitmap {
         if let Some(last) = words.last_mut() {
             *last &= tail_mask(len);
         }
-        Bitmap { words: words.into(), offset: 0, len, ones: AtomicUsize::new(len) }
+        Bitmap { words: words.into(), offset: 0, len, ones: len }
     }
 
     /// `len` copies of `value`.
@@ -108,30 +115,39 @@ impl Bitmap {
         if let Some(last) = words.last_mut() {
             *last &= tail_mask(len);
         }
-        Bitmap { words: words.into(), offset: 0, len, ones: AtomicUsize::new(UNKNOWN) }
+        let ones = words.iter().map(|w| w.count_ones() as usize).sum();
+        Bitmap { words: words.into(), offset: 0, len, ones }
     }
 
-    /// Like [`from_words`](Self::from_words) with the set-bit count already known.
+    /// Like [`from_words`](Self::from_words) with the set-bit count already
+    /// known, which saves counting.
     ///
     /// The count is trusted; passing a wrong one makes later answers wrong
     /// (never unsafe).
-    pub fn from_words_with_count(words: AlignedVec<u64>, len: usize, ones: usize) -> Self {
-        let b = Self::from_words(words, len);
-        b.ones.store(ones, Ordering::Relaxed);
-        b
+    pub fn from_words_with_count(mut words: AlignedVec<u64>, len: usize, ones: usize) -> Self {
+        let n = words_for(len);
+        assert!(words.len() >= n, "{} words cannot hold {len} bits", words.len());
+        words.truncate(n);
+        if let Some(last) = words.last_mut() {
+            *last &= tail_mask(len);
+        }
+        debug_assert_eq!(ones, words.iter().map(|w| w.count_ones() as usize).sum::<usize>());
+        Bitmap { words: words.into(), offset: 0, len, ones }
     }
 
     /// Pack a slice of `bool`.
     pub fn from_bools(values: &[bool]) -> Self {
         let mut words: AlignedVec<u64> = Vec::with_capacity_in(words_for(values.len()), ColumnAlloc);
+        let mut ones = 0usize;
         for chunk in values.chunks(64) {
             let mut w = 0u64;
             for (i, &b) in chunk.iter().enumerate() {
                 w |= (b as u64) << i;
             }
+            ones += w.count_ones() as usize;
             words.push(w);
         }
-        Bitmap { words: words.into(), offset: 0, len: values.len(), ones: AtomicUsize::new(UNKNOWN) }
+        Bitmap { words: words.into(), offset: 0, len: values.len(), ones }
     }
 
     /// Number of bits.
@@ -168,16 +184,16 @@ impl Bitmap {
         (unsafe { *self.words.get_unchecked(j >> 6) } >> (j & 63)) & 1 != 0
     }
 
-    /// Number of set bits. Computed once, then cached.
+    /// Number of set bits.
+    ///
+    /// Known in advance for every bitmap except a partial slice longer than
+    /// 4096 bits, for which this counts (one `popcnt` per 64 bits) on each call.
     #[inline]
     pub fn count_ones(&self) -> usize {
-        let cached = self.ones.load(Ordering::Relaxed);
-        if cached != UNKNOWN {
-            return cached;
+        if self.ones != UNKNOWN {
+            return self.ones;
         }
-        let n = count_ones_range(&self.words, self.offset, self.len);
-        self.ones.store(n, Ordering::Relaxed);
-        n
+        count_ones_range(&self.words, self.offset, self.len)
     }
 
     /// Number of clear bits.
@@ -218,22 +234,18 @@ impl Bitmap {
         let first = start / 64;
         let n_words = words_for(start % 64 + len);
         let ones = if len == self.len {
-            self.ones.load(Ordering::Relaxed)
+            self.ones
         } else if len == 0 {
             0
         } else {
-            match self.ones.load(Ordering::Relaxed) {
+            match self.ones {
                 0 => 0,
                 n if n == self.len => len,
+                _ if len <= EAGER_COUNT_BITS => count_ones_range(&self.words, start, len),
                 _ => UNKNOWN,
             }
         };
-        Bitmap {
-            words: self.words.slice(first, n_words),
-            offset: start % 64,
-            len,
-            ones: AtomicUsize::new(ones),
-        }
+        Bitmap { words: self.words.slice(first, n_words), offset: start % 64, len, ones }
     }
 
     /// The bits as aligned words: bit `i` is bit `i % 64` of word `i / 64`, and
@@ -321,12 +333,8 @@ impl Bitmap {
         let a = self.words();
         let mut out: AlignedVec<u64> = Vec::with_capacity_in(a.len(), ColumnAlloc);
         out.extend(a.iter().map(|&x| !x));
-        let ones = self.ones.load(Ordering::Relaxed);
-        let b = Bitmap::from_words(out, self.len);
-        if ones != UNKNOWN {
-            b.ones.store(self.len - ones, Ordering::Relaxed);
-        }
-        b
+        // `from_words` clears the tail bits and counts.
+        Bitmap::from_words(out, self.len)
     }
 
     /// Turn into a mutable bitmap, reusing the storage when it is not shared.
@@ -347,13 +355,9 @@ impl Bitmap {
 }
 
 impl Clone for Bitmap {
+    #[inline]
     fn clone(&self) -> Self {
-        Bitmap {
-            words: self.words.clone(),
-            offset: self.offset,
-            len: self.len,
-            ones: AtomicUsize::new(self.ones.load(Ordering::Relaxed)),
-        }
+        Bitmap { words: self.words.clone(), offset: self.offset, len: self.len, ones: self.ones }
     }
 }
 
@@ -602,15 +606,12 @@ impl MutableBitmap {
         &mut self.words
     }
 
-    /// Freeze into an immutable [`Bitmap`]. O(1).
+    /// Freeze into an immutable [`Bitmap`] without copying. Counts the set
+    /// bits once (one `popcnt` per 64 bits).
     #[inline]
     pub fn freeze(self) -> Bitmap {
-        Bitmap {
-            words: Buffer::from_aligned(self.words),
-            offset: 0,
-            len: self.len,
-            ones: AtomicUsize::new(UNKNOWN),
-        }
+        let ones = self.count_ones();
+        Bitmap { words: Buffer::from_aligned(self.words), offset: 0, len: self.len, ones }
     }
 }
 

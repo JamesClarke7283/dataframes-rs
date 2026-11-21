@@ -227,6 +227,8 @@ impl Series {
     // ----- element-wise -------------------------------------------------------
 
     /// Absolute value.
+    // The closure is instantiated for unsigned types too, where the test is vacuous.
+    #[allow(clippy::absurd_extreme_comparisons)]
     pub fn abs(&self) -> PolarsResult<Series> {
         for_numeric!(self, ca => Ok(ca.apply_values(|v| if v < Num::ZERO { Num::sub(Num::ZERO, v) } else { v }).into_series()), _ => {
             polars_bail!(InvalidOperation: "`abs` operation not supported for dtype `{}`", self.dtype())
