@@ -222,6 +222,87 @@ fn sum_i64_impl<T: Num>(values: &[T]) -> i64 {
     values.iter().fold(0i64, |a, &b| a.wrapping_add(b.to_i64()))
 }
 
+/// For a 4-bit mask: four 64-bit lanes, all ones where the bit is set.
+#[repr(C, align(64))]
+struct Select4([[u64; 4]; 16]);
+
+static SELECT4: Select4 = Select4({
+    let mut t = [[0u64; 4]; 16];
+    let mut m = 0;
+    while m < 16 {
+        let mut i = 0;
+        while i < 4 {
+            if m >> i & 1 == 1 {
+                t[m][i] = u64::MAX;
+            }
+            i += 1;
+        }
+        m += 1;
+    }
+    t
+});
+
+/// Sum, in `f64`, of the elements whose bit is set in `mask`.
+///
+/// Every row takes part: four rows at a time are ANDed with a lane mask
+/// looked up from their four mask bits, so a row that is not selected
+/// contributes `+0.0`. That keeps the loop free of branches and of any
+/// compaction step, and the fixed lanes keep the result independent of the
+/// vector width.
+#[inline(always)]
+fn sum_f64_selected_impl<T: Num>(values: &[T], mask: &[u64]) -> f64 {
+    let mut acc = [0.0f64; LANES];
+    let full = values.len() / 64;
+    for (&w, rows) in mask[..full].iter().zip(values.chunks_exact(64)) {
+        let mut k = 0;
+        while k < 16 {
+            let select = &SELECT4.0[((w >> (4 * k)) & 0xF) as usize];
+            let lane = (k % (LANES / 4)) * 4;
+            let mut i = 0;
+            while i < 4 {
+                acc[lane + i] += f64::from_bits(rows[4 * k + i].to_f64().to_bits() & select[i]);
+                i += 1;
+            }
+            k += 1;
+        }
+    }
+    let mut tail = 0.0f64;
+    for (j, &v) in values[full * 64..].iter().enumerate() {
+        if (mask[full] >> j) & 1 != 0 {
+            tail += v.to_f64();
+        }
+    }
+    fold_lanes(acc, |a, b| a + b) + tail
+}
+
+/// Wrapping sum, in `i64`, of the elements whose bit is set in `mask`.
+/// Same scheme as [`sum_f64_selected_impl`].
+#[inline(always)]
+fn sum_i64_selected_impl<T: Num>(values: &[T], mask: &[u64]) -> i64 {
+    let mut acc = [0i64; 16];
+    let full = values.len() / 64;
+    for (&w, rows) in mask[..full].iter().zip(values.chunks_exact(64)) {
+        let mut k = 0;
+        while k < 16 {
+            let select = &SELECT4.0[((w >> (4 * k)) & 0xF) as usize];
+            let lane = (k % 4) * 4;
+            let mut i = 0;
+            while i < 4 {
+                acc[lane + i] = acc[lane + i].wrapping_add(rows[4 * k + i].to_i64() & select[i] as i64);
+                i += 1;
+            }
+            k += 1;
+        }
+    }
+    let mut total = acc.iter().fold(0i64, |a, &b| a.wrapping_add(b));
+    for (j, &v) in values[full * 64..].iter().enumerate() {
+        if (mask[full] >> j) & 1 != 0 {
+            total = total.wrapping_add(v.to_i64());
+        }
+    }
+    total
+}
+
 /// Sum of squared deviations from `mean`, in `f64`.
 #[inline(always)]
 fn sum_sq_dev_impl<T: Num>(values: &[T], mean: f64) -> f64 {
@@ -301,6 +382,8 @@ fn count_nan_impl<T: Num>(values: &[T]) -> usize {
 simd_dispatch!(fn sum_serial<T: Num>(values: &[T]) -> T = sum_impl);
 simd_dispatch!(fn sum_f64_serial<T: Num>(values: &[T]) -> f64 = sum_f64_impl);
 simd_dispatch!(fn sum_i64_serial<T: Num>(values: &[T]) -> i64 = sum_i64_impl);
+simd_dispatch!(fn sum_f64_selected_serial<T: Num>(values: &[T], mask: &[u64]) -> f64 = sum_f64_selected_impl);
+simd_dispatch!(fn sum_i64_selected_serial<T: Num>(values: &[T], mask: &[u64]) -> i64 = sum_i64_selected_impl);
 simd_dispatch!(fn sum_sq_dev_serial<T: Num>(values: &[T], mean: f64) -> f64 = sum_sq_dev_impl);
 simd_dispatch!(fn min_max_serial<T: Num>(values: &[T]) -> (T, T) = min_max_impl);
 simd_dispatch!(fn count_nan_serial<T: Num>(values: &[T]) -> usize = count_nan_impl);
@@ -362,6 +445,27 @@ pub fn sum_f64<T: Num>(values: &[T]) -> f64 {
 /// Sum of all elements converted to `i64`, wrapping on overflow.
 pub fn sum_i64<T: Num>(values: &[T]) -> i64 {
     reduce_pieces(values, sum_i64_serial, 0, i64::wrapping_add)
+}
+
+/// Sum, in `f64`, of the elements of `values` whose bit is set in `mask`
+/// (bit `i % 64` of word `i / 64`), computed in one pass without compacting.
+/// Meant for cache-sized blocks; it does not split its input.
+///
+/// # Panics
+/// If `mask` holds fewer than `values.len()` bits.
+pub fn sum_f64_selected<T: Num>(values: &[T], mask: &[u64]) -> f64 {
+    assert!(mask.len() * 64 >= values.len(), "mask too short for {} rows", values.len());
+    sum_f64_selected_serial(values, mask)
+}
+
+/// Wrapping sum, in `i64`, of the elements of `values` whose bit is set in
+/// `mask`. See [`sum_f64_selected`].
+///
+/// # Panics
+/// If `mask` holds fewer than `values.len()` bits.
+pub fn sum_i64_selected<T: Num>(values: &[T], mask: &[u64]) -> i64 {
+    assert!(mask.len() * 64 >= values.len(), "mask too short for {} rows", values.len());
+    sum_i64_selected_serial(values, mask)
 }
 
 /// Sum of squared deviations from `mean`.
@@ -566,6 +670,29 @@ mod tests {
         assert_eq!(count_nan(&v), 100);
         let u: Vec<u64> = (0..500).map(|i| i * i).collect();
         assert_eq!(min_max(&u), Some((0, 499 * 499)));
+    }
+
+    #[test]
+    fn selected_sums_match_a_filter_then_sum() {
+        let mut rng = crate::testutil::Rng::new(91);
+        for n in [0usize, 1, 63, 64, 65, 200, 4096, 10_001] {
+            let ints: Vec<i32> = (0..n).map(|_| rng.below(2001) as i32 - 1000).collect();
+            let floats: Vec<f64> = ints.iter().map(|&v| v as f64 * 0.125).collect();
+            for density in [0u64, 3, 50, 97, 100] {
+                let keep: Vec<bool> = (0..n).map(|_| rng.below(100) < density).collect();
+                let bm = crate::memory::Bitmap::from_bools(&keep);
+                let words = bm.words();
+                let want_i: i64 = ints.iter().zip(&keep).filter(|(_, k)| **k).map(|(&v, _)| v as i64).sum();
+                assert_eq!(sum_i64_selected(&ints, &words), want_i, "n {n} density {density}");
+                // Multiples of 1/8 of moderate size: every order of addition is exact.
+                assert_eq!(sum_f64_selected(&floats, &words), want_i as f64 * 0.125, "n {n} density {density}");
+                assert_eq!(sum_f64_selected(&ints, &words), want_i as f64);
+            }
+        }
+        // Unselected NaN and infinity must not leak into the sum.
+        let values = [f64::NAN, 1.5, f64::INFINITY, 2.5];
+        assert_eq!(sum_f64_selected(&values, &[0b1010]), 4.0);
+        assert!(sum_f64_selected(&values, &[0b0011]).is_nan());
     }
 
     #[test]

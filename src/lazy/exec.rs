@@ -474,6 +474,18 @@ fn reducer_for<'a, T: PolarsNumericType>(ca: &'a ChunkedArray<T>, kind: AggKind)
             // Everything selected: reduce the source directly.
             return reduce(block);
         }
+        if !need_min_max {
+            // A sum does not need the selected rows next to each other: add
+            // every row, with the unselected ones counting as zero.
+            let mut p = Partial { count, ..Partial::EMPTY };
+            if T::Native::IS_FLOAT {
+                p.sum_f = kernels::aggregate::sum_f64_selected(block, mask);
+            } else {
+                p.sum_i = kernels::aggregate::sum_i64_selected(block, mask);
+                p.sum_f = p.sum_i as f64;
+            }
+            return p;
+        }
         // Compact into a buffer that stays in cache, then reduce that.
         let need = (count + APRON / size_of::<T::Native>() + 1) * size_of::<T::Native>() + 64;
         if scratch.len() < need {

@@ -255,9 +255,9 @@ None of `Buffer`, `Bitmap`, the typed columns or the small string holds a
 this has a measurable effect on plain element access: the compiler may treat
 `&column` as read-only memory and keep the data pointer and the length in
 registers across calls it cannot see into. With a cached counter in the
-struct (an earlier design) every `get` in a loop reloaded both; removing it
-made point look-ups 10 % faster than the same loop over an Arrow array, where
-before it was 10 % slower.
+struct (an earlier design) every `get` in a loop reloaded both. Removing it
+took the look-up benchmark from 10 % behind the same loop over an Arrow array
+to about 20 % ahead on the benchmark runner.
 
 ---
 
