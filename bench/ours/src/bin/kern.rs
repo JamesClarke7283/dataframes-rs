@@ -272,8 +272,8 @@ fn main() {
         for round in 0..2 {
             report(&format!("mask i64, 1 thread, small pages ({round})"), rows, time(|| kernels::cmp_scalar_mask_with(&a, CmpOp::Lt, 500, 1)));
             report(&format!("mask i64, 1 thread, one huge page ({round})"), rows, time(|| kernels::cmp_scalar_mask_with(huge, CmpOp::Lt, 500, 1)));
-            report(&format!("plain sum, 1 thread, small pages ({round})"), rows, time(|| sum_slice(&a)));
-            report(&format!("plain sum, 1 thread, one huge page ({round})"), rows, time(|| sum_slice(huge)));
+            report(&format!("plain sum, 1 thread, small pages ({round})"), rows, time(|| sum_slice(black_box(&a))));
+            report(&format!("plain sum, 1 thread, one huge page ({round})"), rows, time(|| sum_slice(black_box(huge))));
         }
     }
     if want("filter") {

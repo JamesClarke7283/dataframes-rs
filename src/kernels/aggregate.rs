@@ -732,7 +732,7 @@ mod tests {
     fn pieces_are_even_and_a_sum_does_not_depend_on_who_computes_it() {
         for n in [1usize, 64, PIECE_ROWS, PIECE_ROWS + 1, 30_000, 100_000, 131_072, 131_073, 1_000_000, 5_000_000] {
             let piece = piece_rows(n);
-            assert!(piece % 64 == 0 && piece <= PIECE_ROWS.max(64), "n {n}: {piece}");
+            assert!(piece.is_multiple_of(64) && piece <= PIECE_ROWS.max(64), "n {n}: {piece}");
             let count = n.div_ceil(piece);
             if n > PIECE_ROWS && count <= BALANCED_PIECES {
                 assert!(count.is_power_of_two(), "n {n}: {count} pieces");

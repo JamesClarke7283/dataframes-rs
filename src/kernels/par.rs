@@ -832,7 +832,7 @@ mod tests {
             for row_bytes in [1usize, 4, 8, 16] {
                 for threads in [1usize, 2, 4, 8] {
                     let step = chunk_rows(rows, row_bytes, threads);
-                    assert!(step >= 64 && step % 64 == 0);
+                    assert!(step >= 64 && step.is_multiple_of(64));
                     let chunks = rows.div_ceil(step);
                     assert!(chunks <= threads * CHUNKS_PER_THREAD, "rows {rows} step {step}");
                 }
