@@ -20,12 +20,17 @@
 //! count), works on it together with the helpers that show up, and returns
 //! when every task has finished and every helper has left.
 //!
-//! * Tasks are claimed with a `fetch_add` on a shared counter, so each index
-//!   is executed exactly once whichever threads take part. A helper that is
-//!   late simply finds fewer tasks; one that never arrives costs nothing.
-//! * A job that wants `h` helpers is served by workers `0..h`. The same
-//!   workers therefore serve every job of a given width, the operating system
-//!   settles them on separate cores, and the rest of the team sleeps.
+//! * The task indices are dealt out in equal consecutive shares, one per
+//!   participant, and each share has its own counter. A participant claims
+//!   from its own share first (`fetch_add`), then from whatever the others
+//!   have left, so each index is executed exactly once whichever threads take
+//!   part. A helper that is late finds its share partly done; one that never
+//!   arrives costs nothing.
+//! * A job that wants `h` helpers is served by workers `0..h`, and the caller
+//!   always has the first share. The same thread therefore gets the same
+//!   part of the input in every job of a given shape: a column that is
+//!   processed again and again stays in the caches of the cores that hold
+//!   its parts, and the rest of the team sleeps.
 //! * The closure lives on the caller's stack. A helper may use it only between
 //!   announcing itself (`active += 1`) and leaving (`active -= 1`), and only
 //!   if it saw the job `open` *after* announcing itself. The caller closes the
@@ -64,6 +69,8 @@ struct Job {
     /// when it may be dereferenced.
     f: *const Task<'static>,
     tasks: usize,
+    /// Number of shares: the helpers the job wants plus the caller.
+    parts: usize,
 }
 
 struct Shared {
@@ -75,8 +82,10 @@ struct Shared {
     open: AtomicBool,
     /// Number of helpers the current job wants: workers `0..helpers`.
     helpers: AtomicUsize,
-    /// Next task index to claim.
-    next: Isolated<AtomicUsize>,
+    /// Per share: the next task index to claim from it. Share `p` covers
+    /// `p * tasks / parts .. (p + 1) * tasks / parts`; the caller owns share
+    /// 0 and worker `k` share `k + 1`.
+    cursors: Vec<Isolated<AtomicUsize>>,
     /// Helpers that announced themselves and have not left.
     active: Isolated<AtomicUsize>,
     /// Number of workers asleep (or about to be).
@@ -162,11 +171,11 @@ fn team() -> Option<&'static Team> {
             return None;
         }
         let shared = Arc::new(Shared {
-            job: UnsafeCell::new(Job { f: std::ptr::null::<fn(usize)>() as *const Task<'static>, tasks: 0 }),
+            job: UnsafeCell::new(Job { f: std::ptr::null::<fn(usize)>() as *const Task<'static>, tasks: 0, parts: 1 }),
             epoch: Isolated(AtomicU64::new(0)),
             open: AtomicBool::new(false),
             helpers: AtomicUsize::new(0),
-            next: Isolated(AtomicUsize::new(0)),
+            cursors: (0..=wanted).map(|_| Isolated(AtomicUsize::new(0))).collect(),
             active: Isolated(AtomicUsize::new(0)),
             sleepers: AtomicUsize::new(0),
             sleeping: (0..wanted).map(|_| AtomicBool::new(false)).collect(),
@@ -228,13 +237,16 @@ pub fn run(tasks: usize, helpers: usize, wake: bool, f: &Task<'_>) {
     // helpers have left (`run` does not return before), so nobody reads `job`.
     // The lifetime of `f` is erased; the guard below keeps this frame alive
     // until no helper can use the pointer any more.
+    let helpers = helpers.min(s.workers());
+    let parts = helpers + 1;
     unsafe {
         let f: *const Task<'static> = std::mem::transmute::<*const Task<'_>, *const Task<'static>>(f);
-        *s.job.get() = Job { f, tasks };
+        *s.job.get() = Job { f, tasks, parts };
     }
     *lock(&s.panic) = None;
-    let helpers = helpers.min(s.workers());
-    s.next.0.store(0, Ordering::Relaxed);
+    for (share, cursor) in s.cursors[..parts].iter().enumerate() {
+        cursor.0.store(share * tasks / parts, Ordering::Relaxed);
+    }
     s.helpers.store(helpers, Ordering::Relaxed);
     s.open.store(true, Ordering::SeqCst);
     s.epoch.0.fetch_add(1, Ordering::SeqCst);
@@ -255,7 +267,7 @@ pub fn run(tasks: usize, helpers: usize, wake: bool, f: &Task<'_>) {
     // Runs on return and on unwind: stop new claims, close the job, and wait
     // until no helper is inside it. Only then may `f` go out of scope.
     let close = DropGuard::new((), |()| {
-        s.next.0.fetch_max(tasks, Ordering::Relaxed);
+        cancel(s, tasks, parts);
         s.open.store(false, Ordering::SeqCst);
         let mut spins = 0u32;
         while s.active.0.load(Ordering::SeqCst) != 0 {
@@ -268,17 +280,35 @@ pub fn run(tasks: usize, helpers: usize, wake: bool, f: &Task<'_>) {
         }
         BUSY.set(false);
     });
-    loop {
-        let i = s.next.0.fetch_add(1, Ordering::Relaxed);
-        if i >= tasks {
-            break;
-        }
-        f(i);
-    }
+    drain(s, tasks, parts, 0, f);
     drop(close);
     let payload = lock(&s.panic).take();
     if let Some(payload) = payload {
         resume_unwind(payload);
+    }
+}
+
+/// Run tasks of the current job as participant `me`: the ones of its own
+/// share first, then the ones the other participants have not claimed yet.
+#[inline]
+fn drain(s: &Shared, tasks: usize, parts: usize, me: usize, call: impl Fn(usize)) {
+    for step in 0..parts {
+        let share = (me + step) % parts;
+        let end = (share + 1) * tasks / parts;
+        loop {
+            let i = s.cursors[share].0.fetch_add(1, Ordering::Relaxed);
+            if i >= end {
+                break;
+            }
+            call(i);
+        }
+    }
+}
+
+/// Make every further claim on the current job fail.
+fn cancel(s: &Shared, tasks: usize, parts: usize) {
+    for cursor in &s.cursors[..parts] {
+        cursor.0.fetch_max(tasks, Ordering::Relaxed);
     }
 }
 
@@ -298,18 +328,14 @@ fn worker_main(s: &Shared, index: usize) {
             // another) before we leave; see the module docs. `helpers` was
             // written before `open` was set, like the job itself.
             let job = unsafe { *s.job.get() };
-            loop {
-                let i = s.next.0.fetch_add(1, Ordering::Relaxed);
-                if i >= job.tasks {
-                    break;
-                }
+            drain(s, job.tasks, job.parts, index + 1, |i| {
                 // SAFETY: as above; the closure is `Sync`.
                 let result = catch_unwind(AssertUnwindSafe(|| unsafe { (*job.f)(i) }));
                 if let Err(payload) = result {
-                    s.next.0.fetch_max(job.tasks, Ordering::Relaxed);
+                    cancel(s, job.tasks, job.parts);
                     lock(&s.panic).get_or_insert(payload);
                 }
-            }
+            });
             s.active.0.fetch_sub(1, Ordering::SeqCst);
             idle_since = Instant::now();
         } else {

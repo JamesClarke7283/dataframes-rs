@@ -3,15 +3,16 @@
 //! A kernel asks how many threads its input is worth ([`tasks_for`]), cuts
 //! the input into a few chunks per thread ([`chunk_rows`]) and hands the
 //! chunks to the [`team`] ([`run`], [`for_each_chunk_mut`],
-//! [`map`]). Chunks are claimed dynamically, so a helper that arrives late or
-//! is descheduled does not hold the others up.
+//! [`map`]). Every thread has its own share of the chunks — the same part of
+//! the input each time, which keeps a column that is processed repeatedly in
+//! the caches of the cores that hold its parts — and takes over what is left
+//! of the others' shares, so a helper that arrives late or is descheduled
+//! does not hold the rest up.
 //!
 //! Whether an input goes parallel depends on its size and on the state of the
 //! team:
 //!
 //! * below two chunks of [`min_task_bytes`] (32 KiB each) it never does;
-//! * nor does an input that fits in one core's L2 cache: the thread that
-//!   holds it reads it faster from there than other cores can fetch it;
 //! * while team workers are polling ("hot"), anything above that does;
 //! * when they are asleep, waking them costs a system call, which only inputs
 //!   of [`WAKE_BYTES`] or more are worth — unless calls arrive in a burst, in
@@ -22,7 +23,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use super::{cache, team};
+use super::team;
 
 /// Default for [`min_task_bytes`].
 pub const DEFAULT_MIN_TASK_BYTES: usize = 32 << 10;
@@ -102,7 +103,7 @@ fn worth_waking(bytes: usize) -> bool {
 pub fn tasks_for(rows: usize, row_bytes: usize) -> usize {
     let bytes = rows.saturating_mul(row_bytes);
     let by_size = bytes / min_task_bytes();
-    if by_size <= 1 || bytes <= cache::cache_info().l2 {
+    if by_size <= 1 {
         return 1;
     }
     let limit = by_size.min(threads());
