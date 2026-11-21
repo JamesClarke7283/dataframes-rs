@@ -282,16 +282,20 @@ fn main() {
         // from 2 MiB) and into the same data in a plain vector (small pages).
         let positions: Vec<u32> = (0..1000u64).map(|i| ((i * 0x9E37_79B9_7F4A_7C15) >> 11) as u32 % rows as u32).collect();
         let plain: Vec<i64> = a.to_vec();
-        let look = |data: &[i64]| {
+        // One copy of the loop for both, so that where the compiler put it
+        // (which alone can cost a third) is the same for both.
+        #[inline(never)]
+        fn look(data: &[i64], positions: &[u32]) -> i64 {
             let mut acc = 0i64;
-            for &i in &positions {
+            for &i in positions {
                 acc = acc.wrapping_add(data.get(black_box(i as usize)).copied().unwrap_or(0));
             }
             acc
-        };
+        }
+        println!("library column at {:p}, plain vector at {:p}", a.as_ptr(), plain.as_ptr());
         for round in 0..3 {
-            report(&format!("1000 look-ups, library column ({round})"), 1000, time(|| look(&a)));
-            report(&format!("1000 look-ups, plain vector ({round})"), 1000, time(|| look(&plain)));
+            report(&format!("1000 look-ups, library column ({round})"), 1000, time(|| look(black_box(&a), &positions)));
+            report(&format!("1000 look-ups, plain vector ({round})"), 1000, time(|| look(black_box(&plain), &positions)));
         }
     }
     if want("filter") {
