@@ -349,11 +349,19 @@ the detected cache size (`DATAFRAMES_STREAM_BYTES` overrides it).
 ### 4.6 Sparse selections
 
 A single column switches to the scalar steps of 4.2. A frame does better:
-for every block in which at most two rows in five survive, the block's mask is
-turned into a list of row indices once, and each output column is gathered
-through the list — it touches only the rows it keeps instead of decoding the
-mask again. Large results are gathered through the same non-temporal staging
-buffer as 4.5.
+for every block in which at most two rows in five survive (one in eight with
+AVX-512, whose compression is cheaper), the block's mask is turned into a
+list of row indices once, and each output column is gathered through the
+list — it touches only the rows it keeps instead of decoding the mask again.
+Large results are gathered through the same non-temporal staging buffer as
+4.5.
+
+Whether the lists beat plain compaction once the data is no longer in the
+cache depends on the machine: with ten million rows and one row in ten kept
+they were a third slower on a Zen 5 and a third faster on an Emerald Rapids.
+A filter over at least 64 blocks therefore times two sparse blocks each way
+(lists, mask, mask, lists) and writes the rest the faster way; the output is
+the same either way.
 
 ### 4.7 Frames and expressions
 
