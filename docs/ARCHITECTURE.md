@@ -396,8 +396,11 @@ stops at AVX2.
 - Kernels use every hardware thread by default (`DATAFRAMES_THREADS`
   restricts them, e.g. to one per physical core; on the benchmark runner the
   second thread of a core never hurt and bought up to 30 % on multi-column
-  filters). The input is cut into a few chunks per thread, claimed
-  dynamically, so a slow or late thread does not hold the others up.
+  filters). The input is cut into a few chunks per thread. Every thread has
+  its own share of them — the same part of the input in every call, which
+  keeps a column that is processed repeatedly in the caches of the cores that
+  hold its parts — and takes over what is left of the others' shares, so a
+  slow or late thread does not hold the rest up.
 - **The team.** General-purpose pools put idle workers to sleep at once, and
   waking one costs tens of microseconds — longer than most operations on a
   column that fits in the cache, which is why such columns are normally
@@ -514,8 +517,10 @@ that makes it sound is *no view extends past `tail`, and `tail` only grows*.
   open *after* announcing itself; the caller closes the job and then waits for
   `active == 0` before it returns. In the sequentially consistent order of
   those four operations either the worker sees the job closed and stays out,
-  or the caller sees the worker and waits. Task indices are handed out by one
-  `fetch_add`, so each runs exactly once whichever threads take part.
+  or the caller sees the worker and waits. Task indices are dealt out in
+  per-participant shares, each with its own counter, and a claim is one
+  `fetch_add` on a share's counter, so every index runs exactly once whichever
+  threads take part.
 - Nested regions and regions started concurrently from several threads do not
   queue: they run on the calling thread.
 - A panic in a task cancels the tasks not yet claimed and is re-raised on the
@@ -613,6 +618,11 @@ check ownership once, then run a plain loop over `&mut [T]`.
   median over rounds.
 - **Verdicts.** More than 3 % faster than the fastest competitor is a win;
   within 3 % is level; anything else is a loss and fails the workflow.
+- **Several machines.** GitHub-hosted runners are not one CPU model: AMD Zen 3
+  (AVX2 only), Zen 4 and Zen 5, and Intel Granite Rapids (all three with
+  AVX-512) have turned up, with L2 caches from 512 KiB to 2 MiB. The published
+  block names the machine of the last run; the probe workflow
+  (`.github/workflows/probe.yml`) reruns the suite on a chosen model.
 - **Defaults only.** dataframes is measured as it ships. Its polling workers
   (4.9) are part of that: in a timing loop they are always awake. The tuning
   workflow (`scripts/tune.py`) measures what each such default buys on the

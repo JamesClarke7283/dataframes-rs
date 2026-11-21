@@ -130,7 +130,7 @@ A filter is two kernels joined by a bitmask: *compare* turns 64 rows into one ma
 - **Parallel and still contiguous** — the ordered-commit pipeline lets every core scan a block, take its output offset in a two-atomic-operation critical section, and compact into one shared allocation. The result is exactly what a sequential filter produces.
 - **Non-temporal stores for results larger than the cache** — skipping the read-for-ownership of every output line removes a third of the memory traffic of a 50 % filter.
 - **Frames share row-index lists** — a frame is filtered block by block over all its columns; a block keeping at most two rows in five turns its mask into a list of row indices once, and every column is gathered through it.
-- **Small columns go parallel too** — the kernels run on a fork-join team whose workers keep polling for 100 µs after a parallel region, so the next region starts in about half a microsecond and columns from 64 KiB upwards use every core.
+- **Small columns go parallel too** — the kernels run on a fork-join team whose workers keep polling for 100 µs after a parallel region, so the next region starts in about half a microsecond and columns from 64 KiB upwards use every core. Each thread always gets the same part of the input, so a column that is worked on repeatedly stays in the caches of the cores that hold its parts.
 - **Predicates on frames are compiled** — `a < 5 & b > 2.0` becomes a tree of block kernels and is fused with the compaction of every output column; `filter(...).select([sum])` adds every row under a lane mask, so the selected rows are never materialised or even compacted.
 - **Run-time dispatch** — the crate compiles for the baseline of its target and selects the AVX-512 or AVX2 kernels at run time, once. `DATAFRAMES_SIMD=scalar` forces the portable kernels, which are also the reference every vector kernel is tested against.
 
@@ -252,6 +252,7 @@ Every number behind the charts, per library: [bench/results/latest.md](bench/res
 - **Same data, same answer.** All drivers read bit-identical columns generated from a fixed seed and report a check value per case; the report refuses to rank results that disagree.
 - **Interleaved runs.** Libraries take turns case by case, for several rounds, so frequency scaling, thermal limits and noisy neighbours hit all of them alike. The reported time is the best median over the rounds.
 - **Level means level.** A difference below 3 % is reported as level, not as a win, and the workflow fails on any case that is slower.
+- **Runners differ.** GitHub-hosted runners are several CPU models — AMD Zen 3 (AVX2 only), Zen 4, Zen 5 and Intel Granite Rapids (AVX-512) have all turned up. The block above names the machine of the last run; the [probe workflow](.github/workflows/probe.yml) reruns the whole suite on a chosen model.
 - **Nothing is switched on for the benchmark.** dataframes runs with its defaults. One of them matters in a timing loop: its worker threads keep polling for 100 µs after a call, so back-to-back calls always find them awake. Set `DATAFRAMES_SPIN_US=0` to measure without it; [`scripts/tune.py`](scripts/tune.py) and the tuning workflow compare such settings side by side.
 
 **Run it yourself**
