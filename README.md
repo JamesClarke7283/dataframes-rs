@@ -251,7 +251,8 @@ Every number behind the charts, per library: [bench/results/latest.md](bench/res
 - **The strongest spelling wins.** Where a library offers several ways to do one thing (eager, lazy or streaming engine in Polars; `query` or mask in pandas; a fused single-pass call here), all are timed and the best one is reported.
 - **Same data, same answer.** All drivers read bit-identical columns generated from a fixed seed and report a check value per case; the report refuses to rank results that disagree.
 - **Interleaved runs.** Libraries take turns case by case, for several rounds, so frequency scaling, thermal limits and noisy neighbours hit all of them alike. The reported time is the best median over the rounds.
-- **Level means level.** A difference below 3 % is reported as level, not as a win. Some operations are the same machine code in every library — a point look-up is a bounds check and a load — and can only ever be level.
+- **Level means level.** A difference below 3 % is reported as level, not as a win, and the workflow fails on any case that is slower.
+- **Nothing is switched on for the benchmark.** dataframes runs with its defaults. One of them matters in a timing loop: its worker threads keep polling for 100 µs after a call, so back-to-back calls always find them awake. Set `DATAFRAMES_SPIN_US=0` to measure without it; [`scripts/tune.py`](scripts/tune.py) and the tuning workflow compare such settings side by side.
 
 **Run it yourself**
 

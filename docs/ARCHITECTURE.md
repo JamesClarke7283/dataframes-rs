@@ -602,6 +602,7 @@ check ownership once, then run a plain loop over `&mut [T]`.
   median over rounds.
 - **Verdicts.** More than 3 % faster than the fastest competitor is a win;
   within 3 % is level; anything else is a loss and fails the workflow.
-- **Operations that can only be level.** A point look-up is a bounds check and
-  a load in every library that stores a column contiguously; such cases are
-  kept in the suite and reported as what they are.
+- **Defaults only.** dataframes is measured as it ships. Its polling workers
+  (4.9) are part of that: in a timing loop they are always awake. The tuning
+  workflow (`scripts/tune.py`) measures what each such default buys on the
+  runner, including with polling switched off.
