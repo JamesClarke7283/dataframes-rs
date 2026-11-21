@@ -561,8 +561,10 @@ pub unsafe fn gather<T: Pod>(src: *const T, idx: &[u32], out: *mut T, stream: bo
     }
     let _ = stream;
     for (j, &i) in idx.iter().enumerate() {
-        // SAFETY: forwarded.
-        unsafe { out.add(j).write(src.add(i as usize).read()) };
+        // SAFETY: forwarded. A volatile read: one ordinary load per element,
+        // which the compiler must not merge into a vector gather (slow on
+        // the CPUs with the gather side-channel fix, no faster elsewhere).
+        unsafe { out.add(j).write(src.add(i as usize).read_volatile()) };
     }
 }
 

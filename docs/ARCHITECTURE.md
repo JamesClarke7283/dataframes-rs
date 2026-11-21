@@ -669,17 +669,24 @@ check ownership once, then run a plain loop over `&mut [T]`.
   `-C target-cpu=native`, thin LTO, and the same allocator. Where a library
   has several spellings or engines for one operation, all are timed and the
   best is reported — for dataframes too.
-- **Interleaving.** `scripts/bench.py run --per-case` runs one case at a time
-  across all libraries, for several rounds; the reported number is the best
-  median over rounds.
-- **Verdicts.** More than 5 % faster than the fastest competitor is a win;
-  within 5 % — about what identical code varies by between two processes on a
-  shared cloud machine — is level; more than 5 % slower is a loss and fails
-  the workflow. A win or a loss must also show in every round (each round is
-  a fresh process for every library): a best time that one process reached
-  and the next did not is noise, whichever library it flatters, and counts as
-  level. Some cases can only be level: a point look-up is a bounds check and
-  a load in every library.
+- **Interleaving and averaging.** `scripts/bench.py run --per-case` runs one
+  case at a time across all libraries, for several rounds, each round a fresh
+  process per library and case. The reported number is the mean over the
+  rounds of each round's median, for the fastest spelling a library has for
+  the case. Not the best round: the same binary can be half as fast again
+  from one process to the next, depending on where the loader puts it and
+  where its buffers land, and the best of several draws rewards exactly that
+  variance (the textbook objection to best-of-N; see Mytkowicz et al.,
+  "Producing wrong data without doing anything obviously wrong!", 2009).
+- **Verdicts.** More than 5 % faster than the fastest competitor is a win,
+  more than 5 % slower a loss, which fails the workflow. In between the
+  report says which side of parity the result is on and that the margin is
+  narrow — 5 % is about what identical code varies by between two runs on a
+  shared cloud machine. Some leads can only be narrow: a point look-up is a
+  bounds check and a load in every library, and a thousand of them at random
+  positions cost what the cache misses cost (0.44 µs on a Zen 4 when every
+  line is in the first-level cache, 0.59 µs in a 100 000-row column, for
+  dataframes and arrow-rs alike).
 - **Several machines.** GitHub-hosted runners are not one CPU model: AMD Zen 3
   (AVX2 only), Zen 4 and Zen 5, and Intel Ice Lake, Emerald Rapids and Granite
   Rapids (all with AVX-512) have turned up, with L2 caches from 512 KiB to

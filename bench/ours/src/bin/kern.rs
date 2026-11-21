@@ -7,6 +7,12 @@
 //! library: it splits one sum between two pinned threads with the smallest
 //! possible hand-off, which shows what a second core can give for an input
 //! that already sits in the first core's cache.
+// The allocator of the benchmark drivers, so that "a plain vector" here is
+// what a competitor's buffer is there.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
@@ -120,6 +126,28 @@ fn duo(data: &mut [i64], split: usize, caller_cpu: Option<usize>, helper_cpu: Op
         go.0.fetch_add(1, Ordering::AcqRel);
         ns
     })
+}
+
+/// A thousand look-ups through the column's accessor, the way the benchmark
+/// driver spells them.
+#[inline(never)]
+fn column_gets(column: &dataframes::prelude::Int64Chunked, positions: &[u32]) -> i64 {
+    let mut acc = 0i64;
+    for &i in positions {
+        if let Some(v) = column.get(black_box(i as usize)) {
+            acc = acc.wrapping_add(v);
+        }
+    }
+    acc
+}
+
+#[inline(never)]
+fn column_gets_or(column: &dataframes::prelude::Int64Chunked, positions: &[u32]) -> i64 {
+    let mut acc = 0i64;
+    for &i in positions {
+        acc = acc.wrapping_add(column.get(black_box(i as usize)).unwrap_or(0));
+    }
+    acc
 }
 
 fn report(name: &str, rows: usize, ns: f64) {
@@ -279,11 +307,12 @@ fn main() {
     if want("lookup") {
         // A thousand point look-ups at fixed random positions, the same in
         // every call: into a column from the library's allocator (huge pages
-        // from 2 MiB) and into the same data in a plain vector (small pages).
+        // from 2 MiB), into the same data in a plain vector (small pages),
+        // and into a plain mapping that asked for huge pages.
         let positions: Vec<u32> = (0..1000u64).map(|i| ((i * 0x9E37_79B9_7F4A_7C15) >> 11) as u32 % rows as u32).collect();
         let plain: Vec<i64> = a.to_vec();
-        // One copy of the loop for both, so that where the compiler put it
-        // (which alone can cost a third) is the same for both.
+        // One copy of the loop for all, so that where the compiler put it
+        // (which alone can cost a third) is the same for all.
         #[inline(never)]
         fn look(data: &[i64], positions: &[u32]) -> i64 {
             let mut acc = 0i64;
@@ -292,10 +321,176 @@ fn main() {
             }
             acc
         }
-        println!("library column at {:p}, plain vector at {:p}", a.as_ptr(), plain.as_ptr());
-        for round in 0..3 {
+        /// The same without the detour of `unwrap_or`: the load can be part
+        /// of the addition.
+        #[inline(never)]
+        fn look_some(data: &[i64], positions: &[u32]) -> i64 {
+            let mut acc = 0i64;
+            for &i in positions {
+                if let Some(&v) = data.get(black_box(i as usize)) {
+                    acc = acc.wrapping_add(v);
+                }
+            }
+            acc
+        }
+        /// `look_some` with the miss marked as the rare case.
+        #[inline(never)]
+        fn look_cold(data: &[i64], positions: &[u32]) -> i64 {
+            let mut acc = 0i64;
+            for &i in positions {
+                match data.get(black_box(i as usize)) {
+                    Some(&v) => acc = acc.wrapping_add(v),
+                    None => std::hint::cold_path(),
+                }
+            }
+            acc
+        }
+        /// `look` with the miss marked as the rare case.
+        #[inline(never)]
+        fn look_or_cold(data: &[i64], positions: &[u32]) -> i64 {
+            let mut acc = 0i64;
+            for &i in positions {
+                let v = match data.get(black_box(i as usize)) {
+                    Some(&v) => v,
+                    None => {
+                        std::hint::cold_path();
+                        0
+                    }
+                };
+                acc = acc.wrapping_add(v);
+            }
+            acc
+        }
+        /// Kilobytes of `data` that sit in huge pages, from the kernel's map.
+        fn huge_kb(data: &[i64]) -> usize {
+            let (lo, hi) = (data.as_ptr() as usize, data.as_ptr() as usize + size_of_val(data));
+            let Ok(maps) = std::fs::read_to_string("/proc/self/smaps") else { return 0 };
+            let (mut inside, mut total) = (false, 0);
+            for line in maps.lines() {
+                let mut parts = line.split_whitespace();
+                let first = parts.next().unwrap_or("");
+                if let Some((start, end)) = first.split_once('-')
+                    && let (Ok(start), Ok(end)) = (usize::from_str_radix(start, 16), usize::from_str_radix(end, 16))
+                {
+                    inside = start < hi && end > lo;
+                } else if inside && first == "AnonHugePages:" {
+                    total += parts.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+                }
+            }
+            total
+        }
+        // A mapping of its own, aligned to 2 MiB, with the request for huge
+        // pages that the library's allocator makes.
+        let bytes = (rows * 8).next_multiple_of(2 << 20);
+        // SAFETY: an anonymous private mapping; checked below; never unmapped.
+        let advised: &mut [i64] = unsafe {
+            let raw = libc::mmap(std::ptr::null_mut(), bytes + (2 << 20), libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
+            assert!(raw != libc::MAP_FAILED);
+            let start = (raw as usize).next_multiple_of(2 << 20) as *mut libc::c_void;
+            libc::madvise(start, bytes, libc::MADV_HUGEPAGE);
+            std::slice::from_raw_parts_mut(start.cast::<i64>(), rows)
+        };
+        advised.copy_from_slice(&a);
+        println!(
+            "library column at {:p} ({} KiB huge), plain vector at {:p} ({} KiB huge), advised mapping at {:p} ({} KiB huge)",
+            a.as_ptr(), huge_kb(&a), plain.as_ptr(), huge_kb(&plain), advised.as_ptr(), huge_kb(advised)
+        );
+        // The same column again, starting somewhere in the middle of a huge
+        // page instead of at its beginning.
+        let mut shifted_block: AlignedVec<i64> = dataframes::memory::zeroed_vec(rows + (1 << 18));
+        let shift = 123_457.min(shifted_block.len() - rows);
+        shifted_block[shift..shift + rows].copy_from_slice(&a);
+        let shifted = &shifted_block[shift..shift + rows];
+        // A column short enough for every looked-up line to stay in the
+        // first-level cache: what the loop costs when nothing misses.
+        let tiny = &a[..rows.min(2048)];
+        let tiny_positions: Vec<u32> = positions.iter().map(|&p| p % tiny.len() as u32).collect();
+        for round in 0..2 {
             report(&format!("1000 look-ups, library column ({round})"), 1000, time(|| look(black_box(&a), &positions)));
             report(&format!("1000 look-ups, plain vector ({round})"), 1000, time(|| look(black_box(&plain), &positions)));
+            report(&format!("1000 look-ups, advised mapping ({round})"), 1000, time(|| look(black_box(advised), &positions)));
+            report(&format!("1000 look-ups, library column, shifted ({round})"), 1000, time(|| look(black_box(shifted), &positions)));
+            report(&format!("1000 look-ups, 2048-row column ({round})"), 1000, time(|| look(black_box(tiny), &tiny_positions)));
+            report(&format!("1000 look-ups, library column, if-let ({round})"), 1000, time(|| look_some(black_box(&a), &positions)));
+            report(&format!("1000 look-ups, library column, if-let, cold miss ({round})"), 1000, time(|| look_cold(black_box(&a), &positions)));
+            report(&format!("1000 look-ups, library column, or-zero, cold miss ({round})"), 1000, time(|| look_or_cold(black_box(&a), &positions)));
+        }
+    }
+    if want("gather") {
+        // Shapes of the loop inside `take`, into a buffer that exists
+        // already, to see what the loop itself costs and what its stores do.
+        let positions: Vec<u32> = (0..1000u64).map(|i| ((i * 0x9E37_79B9_7F4A_7C15) >> 11) as u32 % rows as u32).collect();
+        let mut out = vec![0i64; positions.len()];
+        #[inline(never)]
+        fn one_by_one(src: &[i64], idx: &[u32], out: &mut [i64]) {
+            for (o, &i) in out.iter_mut().zip(idx) {
+                // SAFETY: the positions are below the length.
+                *o = unsafe { src.as_ptr().add(i as usize).read_volatile() };
+            }
+        }
+        #[inline(never)]
+        fn by_fours(src: &[i64], idx: &[u32], out: &mut [i64]) {
+            let p = src.as_ptr();
+            for (o, i) in out.chunks_exact_mut(4).zip(idx.chunks_exact(4)) {
+                // SAFETY: as above.
+                unsafe {
+                    let (a, b, c, d) = (
+                        p.add(i[0] as usize).read_volatile(),
+                        p.add(i[1] as usize).read_volatile(),
+                        p.add(i[2] as usize).read_volatile(),
+                        p.add(i[3] as usize).read_volatile(),
+                    );
+                    (o[0], o[1], o[2], o[3]) = (a, b, c, d);
+                }
+            }
+        }
+        #[inline(never)]
+        fn by_eights(src: &[i64], idx: &[u32], out: &mut [i64]) {
+            let p = src.as_ptr();
+            for (o, i) in out.chunks_exact_mut(8).zip(idx.chunks_exact(8)) {
+                let mut v = [0i64; 8];
+                for k in 0..8 {
+                    // SAFETY: as above.
+                    v[k] = unsafe { p.add(i[k] as usize).read_volatile() };
+                }
+                o.copy_from_slice(&v);
+            }
+        }
+        #[inline(never)]
+        fn sum_only(src: &[i64], idx: &[u32]) -> i64 {
+            let p = src.as_ptr();
+            let mut acc = [0i64; 4];
+            for i in idx.chunks_exact(4) {
+                for k in 0..4 {
+                    // SAFETY: as above.
+                    acc[k] = acc[k].wrapping_add(unsafe { p.add(i[k] as usize).read_volatile() });
+                }
+            }
+            acc.iter().fold(0i64, |a, &b| a.wrapping_add(b))
+        }
+        for round in 0..2 {
+            report(&format!("gather, one by one ({round})"), 1000, time(|| one_by_one(black_box(&a), &positions, &mut out)));
+            report(&format!("gather, by fours ({round})"), 1000, time(|| by_fours(black_box(&a), &positions, &mut out)));
+            report(&format!("gather, by eights ({round})"), 1000, time(|| by_eights(black_box(&a), &positions, &mut out)));
+            report(&format!("sum at positions, no output ({round})"), 1000, time(|| sum_only(black_box(&a), &positions)));
+        }
+        black_box(&out);
+    }
+    if want("take") {
+        // The values at a thousand positions in one call: the kernel alone,
+        // and the pieces around it that a column-level `take` adds.
+        use dataframes::prelude::*;
+        let positions: Vec<u32> = (0..1000u64).map(|i| ((i * 0x9E37_79B9_7F4A_7C15) >> 11) as u32 % rows as u32).collect();
+        let column = Int64Chunked::from_vec("e".into(), a.to_vec());
+        let index = IdxCa::from_vec("positions".into(), positions.clone());
+        for round in 0..2 {
+            report(&format!("take kernel, 1000 of i64 ({round})"), 1000, time(|| kernels::arith::take(&a[..], black_box(&positions))));
+            report(&format!("take kernel, 1000 of i32 ({round})"), 1000, time(|| kernels::arith::take(&c[..], black_box(&positions))));
+            report(&format!("largest position alone ({round})"), 1000, time(|| black_box(&positions).iter().copied().fold(0u32, u32::max)));
+            report(&format!("column take ({round})"), 1000, time(|| column.take(black_box(&index)).unwrap()));
+            report(&format!("column take, then sum ({round})"), 1000, time(|| column.take(black_box(&index)).unwrap().sum()));
+            report(&format!("1000 x column get ({round})"), 1000, time(|| column_gets(black_box(&column), &positions)));
+            report(&format!("1000 x column get, or zero ({round})"), 1000, time(|| column_gets_or(black_box(&column), &positions)));
         }
     }
     if want("filter") {

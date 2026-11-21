@@ -10,7 +10,7 @@ use crate::error::PolarsResult;
 use crate::kernels::aggregate::{self, Num};
 use crate::kernels::{self, CmpOp, Kernel, arith, par, pipeline};
 use crate::memory::{AlignedVec, Bitmap, Buffer, ColumnAlloc, MutableBitmap};
-use crate::polars_ensure;
+use crate::{polars_bail, polars_ensure};
 
 // ---------------------------------------------------------------------------
 // scalars
@@ -869,10 +869,18 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
 
     /// The rows at `indices`, in that order.
     pub fn take_slice(&self, indices: &[IdxSize]) -> PolarsResult<Self> {
-        if let Some(&max) = indices.iter().max() {
-            polars_ensure!((max as usize) < self.len(), OutOfBounds: "index {} is out of bounds for column of length {}", max, self.len());
-        }
-        Ok(self.take_unchecked(indices))
+        let Some(values) = arith::try_take(&self.values, indices) else {
+            let max = indices.iter().copied().max().unwrap_or(0);
+            polars_bail!(OutOfBounds: "index {} is out of bounds for column of length {}", max, self.len());
+        };
+        Ok(ChunkedArray {
+            name: self.name.clone(),
+            values: values.into(),
+            validity: normalize_validity(
+                // SAFETY: the kernel has just checked every index.
+                self.validity.as_ref().map(|v| indices.iter().map(|&i| unsafe { v.get_unchecked(i as usize) }).collect::<Bitmap>()),
+            ),
+        })
     }
 
     /// Gather rows at indices already known to be in bounds (the positions of
@@ -888,17 +896,6 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
             validity: normalize_validity(
                 // SAFETY: as above.
                 self.validity.as_ref().map(|v| indices.iter().map(|&i| unsafe { v.get_unchecked(i as usize) }).collect::<Bitmap>()),
-            ),
-        }
-    }
-
-    /// Gather without reporting out-of-bounds indices as an error (they panic).
-    pub(crate) fn take_unchecked(&self, indices: &[IdxSize]) -> Self {
-        ChunkedArray {
-            name: self.name.clone(),
-            values: arith::take(&self.values, indices).into(),
-            validity: normalize_validity(
-                self.validity.as_ref().map(|v| indices.iter().map(|&i| v.get(i as usize)).collect::<Bitmap>()),
             ),
         }
     }

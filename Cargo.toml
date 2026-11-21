@@ -1,6 +1,6 @@
 [package]
 name = "dataframes"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.100"
 description = "Zero-copy columnar dataframes: allocator-backed cache-aligned columns, SIMD-accelerated filtering, O(1) smart-pointer slicing and snapshot-isolated concurrent mutation, behind a Polars- and pandas-style API."
