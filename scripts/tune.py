@@ -32,6 +32,7 @@ SETTINGS = {
     "no index lists": {"DATAFRAMES_INDEX_EMIT_PERMILLE": "0"},
     "index lists to 40%": {"DATAFRAMES_INDEX_EMIT_PERMILLE": "400"},
     "AVX2 tier": {"DATAFRAMES_SIMD": "avx2"},
+    "workers placed by the scheduler": {"DATAFRAMES_HOME_CORES": "0"},
 }
 
 DEFAULT_CASES = [

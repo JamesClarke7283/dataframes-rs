@@ -390,30 +390,57 @@ stops at AVX2.
 
 ### 4.9 Reductions and work splitting
 
-- Sums, means, minima and maxima are reduced piece by piece (16 384 rows per
-  piece) in a fixed association order: a floating-point sum is bit-identical
-  whatever the number of threads or the vector width.
-- Kernels use every hardware thread by default (`DATAFRAMES_THREADS`
-  restricts them, e.g. to one per physical core; on the benchmark runner the
-  second thread of a core never hurt and bought up to 30 % on multi-column
-  filters). The input is cut into a few chunks per thread. Every thread has
-  its own share of them — the same part of the input in every call, which
-  keeps a column that is processed repeatedly in the caches of the cores that
-  hold its parts — and takes over what is left of the others' shares, so a
-  slow or late thread does not hold the rest up.
+- Sums, means, minima and maxima are reduced piece by piece (at most 16 384
+  rows per piece; a column of up to 64 pieces is cut into a power of two of
+  equal ones, so that two or four threads can share it evenly) in a fixed
+  association order that depends on the length of the column alone: a
+  floating-point sum is bit-identical whatever the number of threads or the
+  vector width.
 - **The team.** General-purpose pools put idle workers to sleep at once, and
   waking one costs tens of microseconds — longer than most operations on a
   column that fits in the cache, which is why such columns are normally
   processed by one core. `kernels::team` is a fork-join executor whose workers
   keep polling for 100 µs after a parallel region (`DATAFRAMES_SPIN_US`).
-  While they poll, starting a region costs about half a microsecond, so
-  inputs from 64 KiB upwards are split — unless the input sits in the calling
-  core's L2 and that core would be through with it in under four
-  microseconds, which is measured, not assumed: the first parallelisable call
-  times one pass over 128 KiB (on the fastest current cores a 100 000-row sum
-  takes three microseconds, and nothing repays a hand-off then). When the
-  workers are asleep, only inputs of 256 KiB or more — or a burst of smaller
-  calls — wake them.
+  While they poll, starting a region costs a few cache-line transfers. Every
+  participant has its own share of the task indices — the same part of the
+  input in every call of a given shape.
+- **Inputs far larger than a core's cache** are split over every hardware
+  thread (`DATAFRAMES_THREADS`), a few chunks per thread, and a thread that
+  is done takes over what the others have left. Sleeping workers are woken
+  for inputs of 256 KiB or more, or for a burst of smaller calls.
+- **Inputs that fit in a core's cache, or nearly** (up to four times the L2
+  size) are where a fixed rule fails. Measured on the runner CPUs with a
+  100 000-row column of 8-byte values: when each core already holds its part
+  — the column is read again and again, or was last written by the same
+  split — two cores take half the time of one (1.9 µs against 3.2 µs on a
+  Zen 5, 3.8 against 7.7 on a Zen 4, 4.7 against 8.9 on a Granite Rapids).
+  When the calling thread has just rewritten the column, every line has to
+  cross to the other core and back, at a tenth of the speed of a cache hit,
+  and the same split takes two to three times *longer* than no split (58 µs
+  against 19 µs on the Zen 4, rewrite included). So `par::plan` measures.
+  Per size class it keeps one decision, initially "one thread" for an input
+  that fits in L2 and "split" above. After 8 calls, and then at intervals
+  that quadruple up to 4096 calls while nothing changes, it times six calls
+  as they are and six the other way (after two untimed ones that move the
+  data), and changes its mind if the median kernel call took at least a ninth
+  less time *and* the caller's cycle from one call to the next did not get
+  longer. The second condition matters: a split can make the kernel faster by
+  taking the column away from the thread that writes it, whose writes then
+  pay. A settled workload spends fourteen calls in four thousand on trials; a
+  workload that changes character runs the wrong way for at most that long.
+  The decision is shared by all kernels of a size class, so that the one that
+  writes a column and the one that reads it agree on which core holds what.
+- **How a cache-resident input is split.** One thread per *physical* core, at
+  most four, with exactly one equal chunk each: two hardware threads of a
+  core share its cache and its path to it, and with one chunk per thread
+  nothing is taken over, so nothing changes cores. On Linux every worker is
+  kept to the hardware threads of one core, and the first workers to cores
+  other than the one the first parallel call came from
+  (`DATAFRAMES_HOME_CORES=0` leaves it to the scheduler): left alone, the
+  scheduler quite often wakes a worker on the second thread of the caller's
+  own core, where it adds nothing — on the runners that alone decided whether
+  the split halved the time or changed nothing. The calling thread is never
+  restricted. Per-thread partial results live on cache lines of their own.
   `rayon` is used for sorting only.
 
 ---
@@ -571,7 +598,9 @@ check ownership once, then run a plain loop over `&mut [T]`.
 | snapshot isolation for shared mutation | readers never wait for a write; atomic multi-column writes | one writer at a time; a writer copies the columns it changes; fetching a new version takes a short mutex |
 | fixed association order for float reductions | bit-identical results across threads and CPUs | cannot use the fastest order on each machine |
 | run-time CPU dispatch | one portable binary | one predictable branch per kernel call |
-| workers poll for 100 µs after a parallel region | columns from 64 KiB use every core; a region starts in under a microsecond | a burst of idle CPU after each region |
+| workers poll for 100 µs after a parallel region | a parallel region starts in a fraction of a microsecond, which makes cache-sized columns worth splitting at all | a burst of idle CPU after each region |
+| the split of a cache-resident column is decided by measurement | half the time where each core keeps its part; no two- to three-fold loss where the caller rewrites the column | fourteen timed or trial calls in up to 4096; a changed workload runs the wrong way for up to 4096 calls; the first calls of a loop run on one thread |
+| each worker keeps to one physical core (Linux) | a split with one helper always spans two cores | a worker cannot move off a core that another process is using; the policy then sees no gain and stops splitting |
 | no interior mutability in columns | `&column` is read-only to the optimiser; pointer and length stay in registers | a bitmap cannot cache a count lazily: it is computed when the bitmap is built, and large partial slices count on request |
 | frame filters block-wise over all columns | one pass, all cores, shared row-index lists | nullable and bit-packed columns take a column-wise path |
 
@@ -624,14 +653,17 @@ check ownership once, then run a plain loop over `&mut [T]`.
 - **Verdicts.** More than 5 % faster than the fastest competitor is a win;
   within 5 % — about what identical code varies by between two processes on a
   shared cloud machine — is level; anything else is a loss and fails the
-  workflow. Some cases can only be level on some machines: a 100 000-row sum
-  that fits in L2 is the same vector loop at the same speed in every library.
+  workflow. Some cases can only be level: a point look-up into a large column
+  is a cache miss in every library.
 - **Several machines.** GitHub-hosted runners are not one CPU model: AMD Zen 3
-  (AVX2 only), Zen 4 and Zen 5, and Intel Granite Rapids (all three with
-  AVX-512) have turned up, with L2 caches from 512 KiB to 2 MiB. The published
-  block names the machine of the last run; the probe workflow
-  (`.github/workflows/probe.yml`) reruns the suite on a chosen model.
+  (AVX2 only), Zen 4 and Zen 5, and Intel Ice Lake, Emerald Rapids and Granite
+  Rapids (all with AVX-512) have turned up, with L2 caches from 512 KiB to
+  2 MiB. The published block names the machine of the last run; the probe
+  workflow (`.github/workflows/probe.yml`) reruns the suite, the settings
+  comparison or the kernel timings on a chosen model.
 - **Defaults only.** dataframes is measured as it ships. Its polling workers
-  (4.9) are part of that: in a timing loop they are always awake. The tuning
-  workflow (`scripts/tune.py`) measures what each such default buys on the
-  runner, including with polling switched off.
+  and its learned split decision (4.9) are part of that: in a timing loop the
+  workers are always awake, and a loop that repeats one call on one column is
+  the case in which splitting a small column pays. The tuning workflow
+  (`scripts/tune.py`) measures what each such default buys on the runner,
+  including with polling switched off and with one thread.

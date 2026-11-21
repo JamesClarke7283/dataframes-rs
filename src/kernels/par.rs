@@ -38,8 +38,9 @@
 //! Every so often the policy times six calls as they are, runs the next
 //! eight the other way (two to move the data, six timed; see [`Plan`]), and
 //! changes its mind if the typical kernel call took at least a ninth less
-//! time that way *and* the caller's whole cycle, from one call to the next,
-//! did not get longer — a split that makes the kernel faster by making the
+//! time that way (a thirty-second is enough for the way back to where it
+//! started) *and* the caller's whole cycle, from one call to the next, did
+//! not get longer — a split that makes the kernel faster by making the
 //! caller's own writes slower is no gain. A trial that changes nothing makes
 //! the next one wait four times as long, up to 4096 calls, so a workload
 //! that is settled pays next to nothing, and one that changes character is
@@ -332,7 +333,9 @@ impl Lane {
                 phase = STEADY;
             }
         } else if phase == TRIAL && left == 0 {
-            let better = self.other_way_is_better();
+            // `split == resident`: the decision in force is not the one the
+            // lane started with.
+            let better = self.other_way_is_better(split == resident);
             if better {
                 split = !split;
                 self.decision.store(if split { SPLIT } else { ALONE }, R);
@@ -390,13 +393,17 @@ impl Lane {
         Plan { tasks, sample: timed.then_some(Sample { lane: self, trial, slot, start }) }
     }
 
-    /// The verdict of a trial.
-    fn other_way_is_better(&self) -> bool {
+    /// The verdict of a trial. `back` says that the other way is the one the
+    /// lane started with.
+    fn other_way_is_better(&self, back: bool) -> bool {
         let [Some(kernel), Some(other_kernel)] = [0, 1].map(|i| median(&self.kernel[i])) else {
             return false;
         };
-        // A clear gain: a ninth less time in the kernel.
-        let kernel_faster = other_kernel * 9 < kernel * 8;
+        // Leaving the starting assumption takes a clear gain, a ninth less
+        // time in the kernel; going back to it takes only a visible one, a
+        // thirty-second. Otherwise a lane that was talked into a split by
+        // one good trial could keep it while it is a tenth slower.
+        let kernel_faster = if back { other_kernel * 32 < kernel * 31 } else { other_kernel * 9 < kernel * 8 };
         let [Some(cycle), Some(other_cycle)] = [0, 1].map(|i| median(&self.cycle[i])) else {
             return kernel_faster;
         };
@@ -732,8 +739,15 @@ mod tests {
             (([3_000, 1_700], [UNKNOWN, UNKNOWN]), true),
         ];
         for ((kernel, cycle), want) in cases {
-            assert_eq!(lane_with(kernel, cycle).other_way_is_better(), want, "kernel {kernel:?} cycle {cycle:?}");
+            assert_eq!(lane_with(kernel, cycle).other_way_is_better(false), want, "kernel {kernel:?} cycle {cycle:?}");
         }
+        // Going back to the starting assumption takes less: a split that was
+        // adopted and is now 8 % slower than one thread is dropped, though an
+        // 8 % gain would never have had it adopted.
+        let slightly = lane_with([3_240, 3_000], [3_300, 3_060]);
+        assert!(slightly.other_way_is_better(true) && !slightly.other_way_is_better(false));
+        let equal = lane_with([3_000, 3_000], [3_060, 3_060]);
+        assert!(!equal.other_way_is_better(true) && !equal.other_way_is_better(false));
     }
 
     #[test]

@@ -260,6 +260,18 @@ fn main() {
         }
         pin_to(None);
     }
+    if want("filter") {
+        // The way a column filters itself: a mask, then a compaction, each
+        // asking the splitting policy on its own.
+        for pct in [1i64, 10, 50] {
+            report(&format!("mask, then compact i64 {pct}% (auto)"), rows, time(|| {
+                let (mask, _) = kernels::cmp_scalar_mask(&a, CmpOp::Lt, pct * 10);
+                kernels::filter_by_mask(&a, &mask)
+            }));
+        }
+        report("mask i64 (auto)", rows, time(|| kernels::cmp_scalar_mask(&a, CmpOp::Lt, 500)));
+        report("sum as f64 (auto)", rows, time(|| aggregate::sum_f64(&b)));
+    }
     if want("mutate") {
         let mut own: AlignedVec<f64> = dataframes::memory::zeroed_vec(rows);
         own.copy_from_slice(&b);
