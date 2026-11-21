@@ -52,7 +52,12 @@ fn main() {
     let a: Vec<i64> = (0..rows).map(|_| (next() % 1000) as i64).collect();
     let b: Vec<f64> = (0..rows).map(|_| (next() % 1_000_000) as f64 / 1e6).collect();
     let c: Vec<i32> = (0..rows).map(|_| (next() % 100) as i32).collect();
-    println!("rows {rows}  threads {}", par::threads());
+    println!(
+        "rows {rows}  threads {}  one thread streams {} KiB/µs from cache  L2 {} KiB",
+        par::threads(),
+        par::stream_rate() >> 10,
+        kernels::cache::cache_info().l2 >> 10
+    );
 
     if want("fork") {
         for helpers in [1usize, 3, 7] {

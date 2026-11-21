@@ -13,6 +13,10 @@
 //! team:
 //!
 //! * below two chunks of [`min_task_bytes`] (32 KiB each) it never does;
+//! * nor does an input that sits in one core's L2 cache and that this core
+//!   gets through in a few microseconds: no hand-off repays itself then. How
+//!   fast "this core" is, is measured once ([`stream_rate`]) — on the fastest
+//!   current CPUs a 100 000-row sum takes three microseconds;
 //! * while team workers are polling ("hot"), anything above that does;
 //! * when they are asleep, waking them costs a system call, which only inputs
 //!   of [`WAKE_BYTES`] or more are worth — unless calls arrive in a burst, in
@@ -23,7 +27,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use super::team;
+use super::{aggregate, cache, team};
 
 /// Default for [`min_task_bytes`].
 pub const DEFAULT_MIN_TASK_BYTES: usize = 32 << 10;
@@ -97,13 +101,53 @@ fn worth_waking(bytes: usize) -> bool {
     last != 0 && now.saturating_sub(last) < BURST_NANOS
 }
 
+/// A serial pass shorter than this is not worth splitting when its input
+/// already sits in the calling core's L2.
+const MIN_PARALLEL_NANOS: usize = 4_000;
+
+/// Bytes per microsecond that one thread of this machine streams through a
+/// reduction when the data is in its own cache. Measured once, on first use
+/// (a few tens of microseconds).
+pub fn stream_rate() -> usize {
+    static RATE: OnceLock<usize> = OnceLock::new();
+    *RATE.get_or_init(|| {
+        const WORDS: usize = 16 << 10; // 128 KiB: in L2 on every CPU of interest
+        let data: Vec<u64> = (0..WORDS as u64).collect();
+        let mut best = u128::MAX;
+        for _ in 0..16 {
+            let start = Instant::now();
+            std::hint::black_box(aggregate::calibration_pass(std::hint::black_box(&data)));
+            best = best.min(start.elapsed().as_nanos());
+        }
+        ((WORDS * 8) as u128 * 1000 / best.max(1)).clamp(1 << 10, 1 << 30) as usize
+    })
+}
+
 /// Number of threads (at least 1) to use for `rows` rows of `row_bytes` bytes
 /// of input each. See the [module documentation](self) for the policy.
 #[inline]
 pub fn tasks_for(rows: usize, row_bytes: usize) -> usize {
+    tasks_for_work(rows, row_bytes, 2)
+}
+
+/// [`tasks_for`] for kernels that do next to nothing per byte (sums, minima,
+/// element-wise arithmetic): they finish a cache-resident input sooner than
+/// a comparison or a compaction does, so they need more of it to be worth
+/// splitting.
+#[inline]
+pub fn tasks_for_light(rows: usize, row_bytes: usize) -> usize {
+    tasks_for_work(rows, row_bytes, 1)
+}
+
+/// `work` is the cost of the kernel per input byte, in units of a plain sum.
+#[inline]
+fn tasks_for_work(rows: usize, row_bytes: usize, work: usize) -> usize {
     let bytes = rows.saturating_mul(row_bytes);
     let by_size = bytes / min_task_bytes();
     if by_size <= 1 {
+        return 1;
+    }
+    if bytes <= cache::cache_info().l2 && bytes.saturating_mul(work) < stream_rate() * (MIN_PARALLEL_NANOS / 1000) {
         return 1;
     }
     let limit = by_size.min(threads());

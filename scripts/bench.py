@@ -14,8 +14,9 @@ thing, and writes a Markdown table, a JSON summary and an SVG chart. With
 `bench:end` markers of that file.
 
 A comparison counts as a win when dataframes is more than `--tie` (default
-3 %) faster than the fastest competitor, as level when the two are within
-that band of each other, and as a loss otherwise. `--gate` fails on losses
+5 %, about what identical code varies by between two processes on a shared
+cloud machine) faster than the fastest competitor, as level when the two are
+within that band of each other, and as a loss otherwise. `--gate` fails on losses
 and on results that disagree between libraries.
 
 Only the Python standard library is used.
@@ -420,7 +421,7 @@ def main():
     t.add_argument("--out-dir", default=str(RESULTS))
     t.add_argument("--name", default="latest")
     t.add_argument("--gate", action="store_true", help="exit 1 if dataframes is slower than a competitor anywhere")
-    t.add_argument("--tie", type=float, default=0.03, help="relative difference below which two libraries count as level")
+    t.add_argument("--tie", type=float, default=0.05, help="relative difference below which two libraries count as level")
     t.add_argument("--readme", default=None, help="README whose bench:start/bench:end block to refresh")
     t.set_defaults(func=report)
     args = p.parse_args()

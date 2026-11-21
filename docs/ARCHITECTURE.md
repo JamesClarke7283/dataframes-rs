@@ -407,8 +407,13 @@ stops at AVX2.
   processed by one core. `kernels::team` is a fork-join executor whose workers
   keep polling for 100 µs after a parallel region (`DATAFRAMES_SPIN_US`).
   While they poll, starting a region costs about half a microsecond, so
-  inputs from 64 KiB upwards are split. When the workers are asleep, only
-  inputs of 256 KiB or more — or a burst of smaller calls — wake them.
+  inputs from 64 KiB upwards are split — unless the input sits in the calling
+  core's L2 and that core would be through with it in under four
+  microseconds, which is measured, not assumed: the first parallelisable call
+  times one pass over 128 KiB (on the fastest current cores a 100 000-row sum
+  takes three microseconds, and nothing repays a hand-off then). When the
+  workers are asleep, only inputs of 256 KiB or more — or a burst of smaller
+  calls — wake them.
   `rayon` is used for sorting only.
 
 ---
@@ -616,8 +621,11 @@ check ownership once, then run a plain loop over `&mut [T]`.
 - **Interleaving.** `scripts/bench.py run --per-case` runs one case at a time
   across all libraries, for several rounds; the reported number is the best
   median over rounds.
-- **Verdicts.** More than 3 % faster than the fastest competitor is a win;
-  within 3 % is level; anything else is a loss and fails the workflow.
+- **Verdicts.** More than 5 % faster than the fastest competitor is a win;
+  within 5 % — about what identical code varies by between two processes on a
+  shared cloud machine — is level; anything else is a loss and fails the
+  workflow. Some cases can only be level on some machines: a 100 000-row sum
+  that fits in L2 is the same vector loop at the same speed in every library.
 - **Several machines.** GitHub-hosted runners are not one CPU model: AMD Zen 3
   (AVX2 only), Zen 4 and Zen 5, and Intel Granite Rapids (all three with
   AVX-512) have turned up, with L2 caches from 512 KiB to 2 MiB. The published

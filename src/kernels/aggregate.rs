@@ -423,7 +423,7 @@ fn reduce_pieces<T: Num, R: Send>(
     if values.len() <= PIECE_ROWS {
         return fold(init, map(values));
     }
-    let tasks = par::tasks_for(values.len(), size_of::<T>());
+    let tasks = par::tasks_for_light(values.len(), size_of::<T>());
     if tasks <= 1 {
         return values.chunks(PIECE_ROWS).map(&map).fold(init, fold);
     }
@@ -445,6 +445,12 @@ fn reduce_pieces<T: Num, R: Send>(
     });
     // SAFETY: every slot was written exactly once above.
     results.into_iter().map(|r| unsafe { r.assume_init() }).fold(init, fold)
+}
+
+/// One serial, vectorised pass over `values`: the yardstick the work-splitting
+/// policy times to learn how fast a core of this machine streams.
+pub(super) fn calibration_pass(values: &[u64]) -> u64 {
+    sum_serial(values)
 }
 
 /// Sum of all elements. Integers wrap on overflow.

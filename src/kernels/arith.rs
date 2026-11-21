@@ -50,7 +50,7 @@ pub fn unary<T: Pod, U: Pod>(values: &[T], f: impl Fn(T) -> U + Sync) -> Aligned
     let n = values.len();
     let mut out: AlignedVec<U> = Vec::with_capacity_in(n, ColumnAlloc);
     let dst = &mut out.spare_capacity_mut()[..n];
-    let tasks = par::tasks_for(n, size_of::<T>().max(size_of::<U>()));
+    let tasks = par::tasks_for_light(n, size_of::<T>().max(size_of::<U>()));
     if tasks <= 1 {
         with_simd(
             #[inline(always)]
@@ -80,7 +80,7 @@ pub fn binary<A: Pod, B: Pod, U: Pod>(a: &[A], b: &[B], f: impl Fn(A, B) -> U + 
     let n = a.len();
     let mut out: AlignedVec<U> = Vec::with_capacity_in(n, ColumnAlloc);
     let dst = &mut out.spare_capacity_mut()[..n];
-    let tasks = par::tasks_for(n, size_of::<A>() + size_of::<B>());
+    let tasks = par::tasks_for_light(n, size_of::<A>() + size_of::<B>());
     if tasks <= 1 {
         with_simd(
             #[inline(always)]
@@ -114,7 +114,7 @@ pub fn unary_in_place<T: Pod>(values: &mut [T], f: impl Fn(T) -> T + Sync) {
         }
     }
     let n = values.len();
-    let tasks = par::tasks_for(n, size_of::<T>());
+    let tasks = par::tasks_for_light(n, size_of::<T>());
     if tasks <= 1 {
         with_simd(
             #[inline(always)]
