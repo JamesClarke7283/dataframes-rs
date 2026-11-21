@@ -100,14 +100,14 @@ pub fn set_min_task_bytes(bytes: usize) {
     MIN_TASK_BYTES.store(bytes.max(1), Ordering::Relaxed);
 }
 
-/// Threads a kernel spreads its input over, the calling thread included.
+/// Most threads a kernel spreads its input over, the calling thread included.
 ///
-/// Every hardware thread by default. Whether the second thread of a core
-/// helps a memory-bound kernel depends on the machine; measured on the
-/// benchmark runner (2 cores, 4 threads) it never hurt and bought up to 30 %
-/// on multi-column filters. The `DATAFRAMES_THREADS` environment variable
-/// overrides the count, for instance to keep to one thread per physical core;
-/// `1` disables intra-column parallelism.
+/// Every hardware thread by default, which is what an input beyond the cache
+/// gets: measured on the benchmark runners (2 cores, 4 threads) the second
+/// thread of a core never hurt there and bought up to 30 % on multi-column
+/// filters. An input that fits in the cache gets one thread per physical
+/// core at most ([`team::cores`]). The `DATAFRAMES_THREADS` environment
+/// variable overrides the count; `1` disables intra-column parallelism.
 #[inline]
 pub fn threads() -> usize {
     team::threads()
