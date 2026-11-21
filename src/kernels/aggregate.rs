@@ -1,13 +1,18 @@
 //! Reductions over native slices.
 //!
-//! Every reduction keeps a fixed number of independent accumulator *lanes*
-//! (element `i` always goes to lane `i % LANES`) and folds the lanes together
-//! in a fixed order at the end. LLVM turns the lane loop into straight vector
-//! code, and because the association order is spelled out rather than left to
-//! the optimiser, a floating-point sum is bit-for-bit identical on every CPU
-//! and at every vector width. As a bonus the lanes bound rounding error much
-//! like pairwise summation does.
-
+//! Two properties hold for every reduction here:
+//!
+//! * **Vector code from a portable build.** The loops are instantiated for
+//!   AVX2 at run time. Integer sums, minima and maxima are plain folds, which
+//!   is the shape LLVM vectorises best. A floating-point sum may not be
+//!   reordered by the compiler, so it keeps a fixed number of accumulator
+//!   *lanes* (element `i` goes to lane `i % LANES`); floating-point minima
+//!   and maxima use explicit vector kernels.
+//! * **One answer.** The association order is spelled out — lanes within a
+//!   piece of [`PIECE_ROWS`] rows, pieces left to right — so a floating-point
+//!   sum is bit-for-bit identical on every CPU, at every vector width and for
+//!   any number of threads. As a bonus the lanes bound rounding error much
+//!   like pairwise summation does.
 
 use super::{Kernel, par, simd_dispatch};
 use crate::memory::tail_mask;

@@ -96,11 +96,12 @@ The layout is a property of the allocator, not of each container. Rust 1.100 sta
 - **A column under construction is a plain `Vec<T, ColumnAlloc>`.** No hand-rolled raw vector: `push`, `extend`, `resize` and `with_capacity_in` all work, and all inherit the layout.
 - **Freezing is a pointer hand-over.** `Vec::into_parts_with_allocator` turns the vector into an immutable shared `Buffer<T>`; `Vec::from_parts_in` turns a uniquely owned buffer back. Neither touches an element.
 - **Numeric columns** are one contiguous buffer of native values plus an optional validity bitmap. There is never a chunk list to search, so element access is a bounds check and a load.
-- **Bitmaps** pack one bit per row into 64-bit words, least significant bit first, and cache their population count. One word selects 64 rows, tests "all" or "none" with one compare and counts with one `popcnt`.
+- **Bitmaps** pack one bit per row into 64-bit words, least significant bit first, and know their population count. One word selects 64 rows, tests "all" or "none" with one compare and counts with one `popcnt`.
 - **Booleans** are bitmaps; logic on them is word-wise and null-aware (Kleene).
 - **Strings** are 16-byte views: up to 12 bytes inline, otherwise length, 4-byte prefix and a position in a shared data buffer. Filtering and slicing strings moves fixed-width views and copies no string bytes.
 - **`Series`** is an inline enum over the typed columns — a `match`, not a heap box and a vtable.
 - **`DataFrame`** is a shared column set plus a row window, which is why slicing a frame costs the same for six columns as for six hundred.
+- **No interior mutability inside a column** — no cell, atomic or lock inline. The optimiser may therefore treat `&column` as read-only and keep pointer and length in registers across calls it cannot see into, which makes a plain `get` loop faster than the same loop over an Arrow array.
 
 ```rust
 use dataframes::memory::{AlignedVec, Buffer, ColumnAlloc};
@@ -122,11 +123,13 @@ fn main() {
 A filter is two kernels joined by a bitmask: *compare* turns 64 rows into one mask word, *compact* turns a word and 64 rows into the surviving rows.
 
 - **Compare → bitmask** for all ten numeric types with AVX2: three base predicates per type plus a complement cover the six operators; unsigned types use a sign-bit bias; floats follow a total order (NaN equals NaN and sorts last).
-- **Table-driven compaction** without data-dependent branches: `vpermd` for 4- and 8-byte elements, `pshufb` for 1- and 2-byte elements, and 16-byte string views through the 8-byte kernel with doubled mask bits. The output cursor advances by a population count.
+- **Table-driven compaction** without data-dependent branches: `vpermd` for 4- and 8-byte elements, `pshufb` for 1- and 2-byte elements, and 16-byte string views through the 8-byte kernel with doubled mask bits. The output offsets of all steps of a mask word come from its population counts up front, so no step waits for the previous one.
+- **Sparse stretches use scalar steps** — the density of each group of mask words picks a fixed number of "lowest set bit, copy, clear" steps per word, again without a data-dependent branch.
 - **Fusion** — when predicate and payload are the same column, the two kernels alternate over cache-sized blocks, so each block is compacted while it is still in L1/L2 and the column crosses the memory bus once.
 - **Parallel and still contiguous** — the ordered-commit pipeline lets every core scan a block, take its output offset in a two-atomic-operation critical section, and compact into one shared allocation. The result is exactly what a sequential filter produces.
 - **Non-temporal stores for results larger than the cache** — skipping the read-for-ownership of every output line removes a third of the memory traffic of a 50 % filter.
-- **Sparse selections switch strategy** — below one row in eight, the mask becomes a row-index list once and every column of the frame is gathered through it.
+- **Frames share row-index lists** — a frame is filtered block by block over all its columns; a block keeping at most two rows in five turns its mask into a list of row indices once, and every column is gathered through it.
+- **Small columns go parallel too** — the kernels run on a fork-join team whose workers keep polling for 100 µs after a parallel region, so the next region starts in about half a microsecond and columns from 64 KiB upwards use every core.
 - **Predicates on frames are compiled** — `a < 5 & b > 2.0` becomes a tree of block kernels and is fused with the compaction of every output column; `filter(...).select([sum])` reduces the selected rows without materialising them.
 - **Run-time dispatch** — the crate compiles for the baseline of its target and selects the AVX2 kernels at run time, once. `DATAFRAMES_SIMD=scalar` forces the portable kernels, which are also the reference the vector kernels are tested against.
 
@@ -196,7 +199,7 @@ The implementation must balance extreme retrieval speeds with the complexity of 
 - **Offsets are applied when slicing, not when reading.** A view stores a pointer that is already offset, so reading through a slice costs exactly what reading the original costs. The price is one more word per handle than a bare `Arc`.
 - **One chunk per column.** Appending may reallocate (amortised, and in place when the buffer is uniquely owned or has spare capacity past every view), but element access never searches a chunk list.
 - **Layout guarantees live in one `unsafe impl`.** Kernels may assume alignment and the apron because `ColumnAlloc` promises them, instead of each call site re-proving it.
-- **Parallelism has to earn its keep.** A column goes parallel only when each task gets enough data to repay the hand-off, and memory-bound kernels use one thread per physical core.
+- **Parallelism has to earn its keep.** Workers that poll briefly instead of sleeping make the hand-off cheap enough for cache-sized columns; the price is a burst of idle CPU after each parallel region (`DATAFRAMES_SPIN_US=0` turns it off). Kernels use one thread per physical core, and sleeping workers are woken only for inputs that repay the system call.
 - **Determinism is kept where it is cheap.** Parallel filters produce the sequential result byte for byte; floating-point sums use a fixed association order and are bit-identical across thread counts and vector widths.
 - **No hidden global state on the hot path.** CPU features, cache sizes and the thread pool are resolved once; afterwards a kernel call is a predictable branch away from its loop.
 

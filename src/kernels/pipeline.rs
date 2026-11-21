@@ -229,7 +229,7 @@ pub fn filter_fused<T: Kernel>(
     let block = block_rows(size_of::<T>());
     let capacity = estimate_capacity(values, op, rhs, block);
     let stream = stream.unwrap_or(capacity * size_of::<T>() >= cache::stream_threshold());
-    let mut out: AlignedVec<T> = Vec::with_capacity_in(capacity, ColumnAlloc);
+    let mut out: AlignedVec<T> = Vec::with_capacity_in(capacity.max(1), ColumnAlloc);
     let dst = par::SendPtr(out.as_mut_ptr());
 
     let done = scan_then_emit(

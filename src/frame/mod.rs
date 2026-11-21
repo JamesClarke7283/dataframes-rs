@@ -1,9 +1,15 @@
 //! Layer 5 — [`DataFrame`]: equal-length named columns.
 //!
-//! A frame is a `Vec` of [`Column`]s and a height. Every structural operation
-//! that does not have to touch data doesn't: `select`, `slice`, `head`,
-//! `tail`, `clone`, `hstack` and `drop` only move the three-word buffer
-//! handles of the columns involved.
+//! A frame is a reference-counted set of [`Column`]s plus a row window.
+//! Every structural operation that does not have to touch data doesn't:
+//! `slice`, `head`, `tail` and `clone` copy one pointer and the window,
+//! whatever the number of columns; `select`, `hstack` and `drop` move the
+//! three-word buffer handles of the columns involved.
+//!
+//! Filtering runs block-wise over all columns at once (see
+//! `lazy::exec`): every core takes blocks of rows, and each block is written
+//! to all output columns either through the mask or through one shared list
+//! of row indices, whichever is cheaper at that block's density.
 //!
 //! The method names and signatures follow Polars 0.55. pandas spellings live
 //! in the `pandas` submodule.

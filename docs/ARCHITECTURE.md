@@ -29,7 +29,8 @@ mutation. Section numbers are stable; the code refers to them.
 - Mutation and concurrency that are safe by construction, with guarantees
   that are written down and tested rather than implied.
 - The API of Polars and pandas, so existing knowledge and code carry over.
-- Stable Rust only (1.100 or newer), two small dependencies (`rayon`, `libc`).
+- Stable Rust only (1.100 or newer), two small dependencies (`rayon` for
+  sorting, `libc` for `mmap`).
 
 **Non-goals (for now)**: out-of-core execution, file formats, temporal and
 nested types, a cost-based query optimiser.
@@ -70,7 +71,7 @@ be read, tested and replaced on its own.
 | module | files | what it owns | what it must not know |
 |--------|-------|--------------|-----------------------|
 | `memory` | `alloc.rs`, `buffer.rs`, `bitmap.rs` | the layout contract, lifetime of bytes, sharing, copy-on-write | columns, types, names |
-| `kernels` | `x86.rs`, `scalar.rs`, `tables.rs`, `aggregate.rs`, `arith.rs`, `pipeline.rs`, `par.rs`, `cache.rs` | every hot loop; CPU-feature dispatch; cache and thread policy | nulls as a concept, names, frames |
+| `kernels` | `x86.rs`, `scalar.rs`, `tables.rs`, `aggregate.rs`, `arith.rs`, `pipeline.rs`, `par.rs`, `team.rs`, `cache.rs` | every hot loop; CPU-feature dispatch; cache and thread policy; the fork-join team | nulls as a concept, names, frames |
 | `datatypes` | `mod.rs`, `any_value.rs`, `small_str.rs` | the logical vocabulary | storage |
 | `chunked_array` | `mod.rs`, `ops.rs`, `boolean.rs`, `string.rs` | typed columns: values + validity, and the typed operations on them | other columns |
 | `series` | `mod.rs`, `arithmetic.rs`, `comparison.rs`, `pandas.rs` | run-time typing and dispatch | frames |
@@ -173,8 +174,8 @@ Three machine words. `Deref<Target = [T]>`.
 ### 3.3 `Bitmap`
 
 One bit per row in 64-bit words, least significant bit first (the Arrow layout
-viewed eight bytes at a time), plus a bit offset below 64, a length and a
-lazily cached population count.
+viewed eight bytes at a time), plus a bit offset below 64, a length and the
+population count.
 
 - The 64-bit word is the unit every kernel consumes: one word selects 64 rows,
   tests "all" or "none" with one compare and counts with one `popcnt`.
@@ -183,6 +184,10 @@ lazily cached population count.
   small temporary otherwise.
 - Bitmaps serve three roles with one representation: boolean values, validity
   (null) masks and filter predicates.
+- The count is a plain field, filled in when the bitmap is built (the kernels
+  that produce masks return it for free); only a partial slice longer than
+  4096 bits leaves it open and counts on request. There is deliberately no
+  interior mutability here — see 3.7.
 
 ### 3.4 Typed columns
 
@@ -241,6 +246,17 @@ pub struct DataFrame {
   in place for a sole owner, one shallow copy of the handles otherwise. Column
   *data* is copy-on-write per column (section 6).
 
+### 3.7 No interior mutability in a column
+
+None of `Buffer`, `Bitmap`, the typed columns or the small string holds a
+`Cell`, an atomic or a lock inline. Besides making them trivially `Sync`,
+this has a measurable effect on plain element access: the compiler may treat
+`&column` as read-only memory and keep the data pointer and the length in
+registers across calls it cannot see into. With a cached counter in the
+struct (an earlier design) every `get` in a loop reloaded both; removing it
+made point look-ups 10 % faster than the same loop over an Arrow array, where
+before it was 10 % slower.
+
 ---
 
 ## 4. SIMD-accelerated filtering
@@ -267,10 +283,17 @@ A filter is two kernels joined by a bitmask.
 
 ### 4.2 Compaction
 
-- **4- and 8-byte elements:** a table of `vpermd` index vectors, one entry per
-  mask byte (or nibble). The store is always a whole vector and the output
-  cursor advances by the population count, so the loop body has no
-  data-dependent branch. The apron (L2) makes the last store legal.
+- **4- and 8-byte elements, dense words:** a table of `vpermd` index vectors,
+  one entry per mask byte (or nibble). Stores are whole vectors. The output
+  offset of every step of a 64-row word is derived from the word's population
+  counts before the first step runs, so there is no data-dependent branch and
+  no step waits for the previous one. The apron (L2) makes the last store
+  legal.
+- **Sparse stretches:** the density of each group of 16 mask words picks a
+  fixed number of scalar steps per word (4, 8 or 12): take the lowest set
+  bit, copy that element, clear the bit. Steps beyond a word's population
+  count copy a harmless element past the cursor, so this loop is branch-free
+  too.
 - **1- and 2-byte elements:** the same scheme with `pshufb`.
 - **16-byte string views:** each mask bit is doubled and the pair goes through
   the 8-byte kernel.
@@ -315,14 +338,22 @@ the detected cache size (`DATAFRAMES_STREAM_BYTES` overrides it).
 
 ### 4.6 Sparse selections
 
-When fewer than one row in eight survives, the mask is converted to a list of
-row indices once, and each column is gathered through the list. For a frame
-the list is built once and shared by all columns.
+A single column switches to the scalar steps of 4.2. A frame does better:
+for every block in which at most two rows in five survive, the block's mask is
+turned into a list of row indices once, and each output column is gathered
+through the list — it touches only the rows it keeps instead of decoding the
+mask again. Large results are gathered through the same non-temporal staging
+buffer as 4.5.
 
 ### 4.7 Frames and expressions
 
-- `DataFrame::filter(&mask)` compacts each column with the kernels above; the
-  streaming decision is made for the frame as a whole.
+- `DataFrame::filter(&mask)` runs the ordered-commit pipeline over blocks of
+  rows of *all* columns: every core claims a block, takes its output offset,
+  and writes that block of every column (4.2 or 4.6, by density). Blocks are
+  large here (up to 65 536 rows) so that each column of a block is a long
+  sequential run for the hardware prefetchers. The streaming decision is made
+  for the frame as a whole. Nullable and bit-packed columns are filtered
+  column by column instead.
 - A lazy predicate (`col("a").lt(lit(5)).and(col("b").gt(lit(2.0)))`) is
   compiled into a small tree whose leaves are block kernels. The executor
   evaluates the tree for a block and immediately compacts that block of every
@@ -344,12 +375,22 @@ written once and re-instantiated inside a `#[target_feature]` wrapper
 
 ### 4.9 Reductions and work splitting
 
-- Sums, means, minima and maxima are reduced piece by piece (65 536 rows per
+- Sums, means, minima and maxima are reduced piece by piece (16 384 rows per
   piece) in a fixed association order: a floating-point sum is bit-identical
   whatever the number of threads or the vector width.
-- A kernel goes parallel only when every task has at least 1 MiB of input
-  (`DATAFRAMES_MIN_TASK_BYTES`), and memory-bound kernels use one thread per
-  physical core: SMT siblings add contention, not bandwidth.
+- Kernels use one thread per physical core: SMT siblings add contention, not
+  bandwidth. The input is cut into a few chunks per thread, claimed
+  dynamically, so a slow or late thread does not hold the others up.
+- **The team.** General-purpose pools put idle workers to sleep at once, and
+  waking one costs tens of microseconds — longer than most operations on a
+  column that fits in the cache, which is why such columns are normally
+  processed by one core. `kernels::team` is a fork-join executor whose workers
+  keep polling for 100 µs after a parallel region (`DATAFRAMES_SPIN_US`).
+  While they poll, starting a region costs about half a microsecond, so
+  inputs from 64 KiB upwards are split. When the workers are asleep, only
+  inputs of 256 KiB or more — or a burst of smaller calls — wake them.
+  `DATAFRAMES_THREADS` caps the thread count; `rayon` is used for sorting
+  only.
 
 ---
 
@@ -451,8 +492,18 @@ that makes it sound is *no view extends past `tail`, and `tail` only grows*.
   population counts (static partitioning) or from the commit order (4.4), so
   disjointness is by construction.
 - Input is shared immutably.
-- A panic in a worker is propagated to the caller after the other workers
-  have been released.
+- **The team's job slot.** A parallel region lends a closure on the caller's
+  stack to the workers. A worker may use it only between announcing itself
+  (`active += 1`) and leaving (`active -= 1`), and only if it saw the job
+  open *after* announcing itself; the caller closes the job and then waits for
+  `active == 0` before it returns. In the sequentially consistent order of
+  those four operations either the worker sees the job closed and stays out,
+  or the caller sees the worker and waits. Task indices are handed out by one
+  `fetch_add`, so each runs exactly once whichever threads take part.
+- Nested regions and regions started concurrently from several threads do not
+  queue: they run on the calling thread.
+- A panic in a task cancels the tasks not yet claimed and is re-raised on the
+  caller after every worker has left the job.
 
 ### 5.6 Deliberately not offered
 
@@ -494,7 +545,9 @@ check ownership once, then run a plain loop over `&mut [T]`.
 | snapshot isolation for shared mutation | readers never block; atomic multi-column writes | one writer at a time; a writer copies the columns it changes |
 | fixed association order for float reductions | bit-identical results across threads and CPUs | cannot use the fastest order on each machine |
 | run-time CPU dispatch | one portable binary | one predictable branch per kernel call |
-| parallelism only above a size threshold | small columns never pay for a thread hand-off | medium columns leave cores idle |
+| workers poll for 100 µs after a parallel region | columns from 64 KiB use every core; a region starts in under a microsecond | a burst of idle CPU after each region; one extra thread per core |
+| no interior mutability in columns | `&column` is read-only to the optimiser; pointer and length stay in registers | a bitmap cannot cache a count lazily: it is computed when the bitmap is built, and large partial slices count on request |
+| frame filters block-wise over all columns | one pass, all cores, shared row-index lists | nullable and bit-packed columns take a column-wise path |
 
 ---
 
@@ -510,6 +563,11 @@ check ownership once, then run a plain loop over `&mut [T]`.
   every block and word boundary, and mask densities from empty to full.
 - **Both dispatch paths in CI.** The test suite runs with run-time dispatch,
   with `-C target-cpu=native`, with `DATAFRAMES_SIMD=scalar`, and on aarch64.
+- **Whole-frame filters against a row-by-row model** at densities on both
+  sides of every strategy switch, for heights below and above the block and
+  parallel thresholds, eager and lazy, with and without nullable columns.
+- **The team** is tested for exactly-once execution, borrowing from the
+  caller's stack, nested and concurrent callers, and panic propagation.
 - **Concurrency tests.** Snapshot isolation is exercised with concurrent
   readers and writers checking G1, G2 and G5; in-place append is tested
   against snapshots taken before it.

@@ -397,7 +397,7 @@ impl<T: crate::memory::Pod, F: Fn(AlignedVec<T>) -> Series + Sync> Sink for PodS
 
 fn sink_for<'a>(column: &'a Column, capacity: usize) -> Option<Box<dyn Sink + 'a>> {
     fn numeric<'a, T: PolarsNumericType>(ca: &'a ChunkedArray<T>, capacity: usize) -> Box<dyn Sink + 'a> {
-        let mut out: AlignedVec<T::Native> = Vec::with_capacity_in(capacity, ColumnAlloc);
+        let mut out: AlignedVec<T::Native> = Vec::with_capacity_in(capacity.max(1), ColumnAlloc);
         let name = ca.name().clone();
         Box::new(PodSink {
             src: ca.values().as_slice(),
@@ -411,7 +411,7 @@ fn sink_for<'a>(column: &'a Column, capacity: usize) -> Option<Box<dyn Sink + 'a
     }
     for_numeric!(column, ca => Some(numeric(ca, capacity)), other => match other {
         SeriesInner::String(ca) => {
-            let mut out: AlignedVec<View> = Vec::with_capacity_in(capacity, ColumnAlloc);
+            let mut out: AlignedVec<View> = Vec::with_capacity_in(capacity.max(1), ColumnAlloc);
             let (name, buffers) = (ca.name().clone(), ca.buffers.clone());
             Some(Box::new(PodSink {
                 src: ca.views.as_slice(),

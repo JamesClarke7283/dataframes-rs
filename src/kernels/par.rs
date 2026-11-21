@@ -2,7 +2,7 @@
 //!
 //! A kernel asks how many threads its input is worth ([`tasks_for`]), cuts
 //! the input into a few chunks per thread ([`chunk_rows`]) and hands the
-//! chunks to the [`team`](super::team) ([`run`], [`for_each_chunk_mut`],
+//! chunks to the [`team`] ([`run`], [`for_each_chunk_mut`],
 //! [`map`]). Chunks are claimed dynamically, so a helper that arrives late or
 //! is descheduled does not hold the others up.
 //!

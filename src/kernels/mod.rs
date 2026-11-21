@@ -23,9 +23,17 @@
 //! * [`filter_by_cmp_scalar`] — predicate and payload are the same column:
 //!   the two kernels alternate over 4096-row blocks so the block is still in
 //!   L1/L2 when it is compacted, and the column is read from memory once.
-//! * the parallel form of both — the mask is computed by all cores, per-range
-//!   population counts give every range its exact output offset, and the cores
-//!   compact disjoint ranges straight into one contiguous allocation.
+//! * the parallel form of both — the mask is computed by all cores, per-chunk
+//!   population counts give every chunk its exact output offset, and the cores
+//!   compact disjoint chunks straight into one contiguous allocation
+//!   ([`pipeline`] does the same in a single pass).
+//!
+//! # Parallelism
+//!
+//! Kernels split their input through [`par`], which hands the pieces to the
+//! [`team`]: a fork-join executor whose workers stay awake for a moment after
+//! a parallel region, so that the next one starts within a microsecond. That
+//! is what lets a column of a few hundred kilobytes use every core.
 
 pub mod aggregate;
 pub mod arith;
@@ -299,7 +307,10 @@ impl_kernel_float! {
 ///   `words_for(n)` words.
 /// * `out` must be aligned for `T`, valid for `out_cap` writes and must not
 ///   overlap `values`. Any of those `out_cap` slots may be overwritten,
-///   including ones past the returned count; nothing beyond them is touched.
+///   including ones past the returned count — even when nothing is selected —
+///   and nothing beyond them is touched. (A caller that counts on the
+///   allocator's apron must therefore pass a vector that owns a block: an
+///   empty `Vec` has none.)
 ///   If more than `out_cap` bits are set, only the first `out_cap` selected
 ///   elements are written.
 /// * With `stream`, the calling thread must call [`pipeline::stream_fence`]
@@ -410,8 +421,12 @@ pub fn mask_indices(mask: &[u64], n: usize, base: u32) -> AlignedVec<u32> {
     assert!(mask.len() >= words_for(n), "mask too short for {n} rows");
     assert!(n <= u32::MAX as usize - base as usize, "row indices must fit in 32 bits");
     let count = count_ones_range(mask, 0, n);
+    if count == 0 {
+        // An empty vector owns no block, so there would be no apron either.
+        return Vec::new_in(ColumnAlloc);
+    }
     // The allocator's apron provides the eight slots of vector overhang.
-    let mut out: AlignedVec<u32> = Vec::with_capacity_in(count, ColumnAlloc);
+    let mut out: AlignedVec<u32> = Vec::with_capacity_in(count.max(1), ColumnAlloc);
     #[cfg(target_arch = "x86_64")]
     if level() >= Level::Avx2 {
         // SAFETY: capacity `count` plus a 64-byte apron (16 slots); AVX2 detected.
@@ -601,7 +616,7 @@ pub fn filter_by_mask_with<T: Pod>(
             // SAFETY: every index is the position of a set bit below `n`.
             return unsafe { arith::take_unchecked(values, &idx) };
         }
-        let mut out: AlignedVec<T> = Vec::with_capacity_in(count, ColumnAlloc);
+        let mut out: AlignedVec<T> = Vec::with_capacity_in(count.max(1), ColumnAlloc);
         // SAFETY: `out` has room for `count` elements plus the allocator's
         // apron; `compact` writes at most `count + apron` slots and `count`
         // is the exact population count, so `count` slots are initialised.
@@ -635,7 +650,7 @@ pub fn filter_by_mask_with<T: Pod>(
         return Vec::new_in(ColumnAlloc);
     }
     let stream = streaming(count);
-    let mut out: AlignedVec<T> = Vec::with_capacity_in(count, ColumnAlloc);
+    let mut out: AlignedVec<T> = Vec::with_capacity_in(count.max(1), ColumnAlloc);
     let dst = par::SendPtr(out.as_mut_ptr());
     let last = ranges.len() - 1;
     par::run(ranges.len(), tasks, |i| {
@@ -692,7 +707,7 @@ pub fn filter_by_cmp_scalar_with<T: Kernel>(
     let apron = APRON / size_of::<T>();
     let estimate = estimate_matches(values, op, rhs);
     let stream = stream.unwrap_or(estimate * size_of::<T>() >= cache::stream_threshold());
-    let mut out: AlignedVec<T> = Vec::with_capacity_in(estimate, ColumnAlloc);
+    let mut out: AlignedVec<T> = Vec::with_capacity_in(estimate.max(1), ColumnAlloc);
     let mut words = [0u64; BLOCK_ROWS / 64];
     for block in values.chunks(BLOCK_ROWS) {
         let count = T::cmp_scalar(block, op, rhs, &mut words);

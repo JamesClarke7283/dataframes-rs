@@ -10,9 +10,11 @@
 //!   `vpcmp*` + `vmovmsk*`. Six operators are covered by three vector
 //!   predicates and an optional complement of the finished word.
 //! * **compaction**: `vpermd` (32/64-bit lanes) or `pshufb` (8/16-bit lanes)
-//!   with a table lookup per mask chunk. The store is a full vector and the
-//!   output cursor advances by the population count, so the loop body has no
-//!   data-dependent branch; the only loop-carried dependency is one add.
+//!   with a table lookup per mask chunk. Stores are whole vectors and the
+//!   output offsets of a mask word's steps are computed from its population
+//!   counts up front, so the loop has no data-dependent branch and no step
+//!   waits for the one before it. Sparse stretches of the mask use a fixed
+//!   number of scalar steps per word instead (lowest set bit, copy, clear).
 
 use std::arch::x86_64::*;
 
@@ -1032,48 +1034,83 @@ min_or_max_float_kernel!(
 /// Write the positions of the set bits among the first `n` bits of `mask`
 /// (plus `base`) to `out`, ascending. Returns how many were written.
 ///
-/// One table look-up per eight rows whatever the element type that is later
-/// gathered, which is what makes "indices, then gather" cheaper than
-/// compaction for sparse selections and for wide elements.
+/// One table look-up per eight rows — or a few scalar steps per word where
+/// the mask is sparse — whatever the element type that is later gathered,
+/// which is what makes "indices, then gather" cheaper than compaction when
+/// several columns share one mask.
 ///
 /// # Safety
 /// * `out` must be valid for `count + 8` writes, where `count` is the number
 ///   of set bits among the first `n` (whole vectors are stored).
-/// * The CPU must support AVX2 and POPCNT.
-#[target_feature(enable = "avx2,popcnt")]
+/// * The CPU must support AVX2, BMI1 and POPCNT.
+#[target_feature(enable = "avx2,bmi1,popcnt")]
 pub unsafe fn mask_indices(mask: &[u64], n: usize, base: u32, out: *mut u32) -> usize {
     let table = PERM32.0.as_ptr();
     let n_words = n.div_ceil(64);
+    let eight = _mm256_set1_epi32(8);
     let mut o = 0usize;
-    // SAFETY: every store begins at `o <= count` and writes 8 lanes, within
-    // the `count + 8` slots the caller provides; table entries are 32 bytes.
+    let mut wi = 0;
+    // Bits past `n` in the last word do not count.
+    let word = |wi: usize| -> u64 {
+        // SAFETY: `wi < n_words <= mask.len()`.
+        let w = unsafe { *mask.get_unchecked(wi) };
+        if wi + 1 == n_words && !n.is_multiple_of(64) { w & ((1u64 << (n % 64)) - 1) } else { w }
+    };
+    // SAFETY: a sparse word writes `K <= 8` slots at `o`, a dense word writes
+    // eight slots at offsets below its population count; in both cases the
+    // writes end at most eight slots past the running count, inside the
+    // `count + 8` slots the caller provides. Table entries are 32 bytes.
     unsafe {
-        for wi in 0..n_words {
-            let mut w = *mask.get_unchecked(wi);
-            if wi + 1 == n_words && !n.is_multiple_of(64) {
-                w &= (1u64 << (n % 64)) - 1;
+        while wi < n_words {
+            let end = (wi + GROUP_WORDS).min(n_words);
+            let ones: usize = (wi..end).map(|i| word(i).count_ones() as usize).sum();
+            let words = end - wi;
+            macro_rules! sparse_run {
+                ($k:literal) => {
+                    while wi < end {
+                        let mut w = word(wi);
+                        let pc = w.count_ones() as usize;
+                        if pc > $k {
+                            break; // denser than its group: the table steps take over
+                        }
+                        let row = base.wrapping_add((wi * 64) as u32);
+                        let mut j = 0;
+                        while j < $k {
+                            out.add(o + j).write(row.wrapping_add(_tzcnt_u64(w) as u32));
+                            w = _blsr_u64(w);
+                            j += 1;
+                        }
+                        o += pc;
+                        wi += 1;
+                    }
+                };
             }
-            if w == 0 {
-                continue;
+            if 2 * ones <= 3 * words {
+                sparse_run!(4)
+            } else if ones <= 4 * words {
+                sparse_run!(8)
             }
-            let row = base.wrapping_add((wi * 64) as u32);
-            if w.count_ones() <= 2 {
-                // Sparse word: two cheap extractions beat eight table steps.
-                while w != 0 {
-                    out.add(o).write(row + w.trailing_zeros());
-                    o += 1;
-                    w &= w - 1;
+            while wi < end {
+                let w = word(wi);
+                if w != 0 {
+                    // Where each mask byte's indices begin: running byte counts.
+                    let n1 = w - ((w >> 1) & M55);
+                    let n2 = (n1 & M33) + ((n1 >> 2) & M33);
+                    let starts = ((n2 + (n2 >> 4)) & M0F).wrapping_mul(M01) << 8;
+                    let mut rows = _mm256_set1_epi32(base.wrapping_add((wi * 64) as u32) as i32);
+                    let dst = out.add(o);
+                    let mut k = 0;
+                    while k < 8 {
+                        let chunk = ((w >> (8 * k)) & 0xFF) as usize;
+                        let at = ((starts >> (8 * k)) & 0xFF) as usize;
+                        let lanes = _mm256_load_si256(table.add(chunk).cast());
+                        _mm256_storeu_si256(dst.add(at).cast(), _mm256_add_epi32(lanes, rows));
+                        rows = _mm256_add_epi32(rows, eight);
+                        k += 1;
+                    }
+                    o += w.count_ones() as usize;
                 }
-                continue;
-            }
-            let mut k = 0u32;
-            while k < 8 {
-                let mb = (w >> (8 * k) & 0xFF) as usize;
-                let lanes = _mm256_load_si256(table.add(mb).cast());
-                let rows = _mm256_add_epi32(lanes, _mm256_set1_epi32((row + 8 * k) as i32));
-                _mm256_storeu_si256(out.add(o).cast(), rows);
-                o += (mb as u32).count_ones() as usize;
-                k += 1;
+                wi += 1;
             }
         }
     }

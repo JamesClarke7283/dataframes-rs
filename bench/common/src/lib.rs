@@ -167,6 +167,17 @@ pub struct Record {
     pub check: f64,
 }
 
+/// Make a result count as used, then drop it.
+///
+/// The result is observed where it was produced. Passing it to `black_box` by
+/// value would first copy it, and for a result of a few machine words (a
+/// sliced column, say) that copy - a wide load from memory that was just
+/// written field by field - costs more than producing the result did.
+#[inline(always)]
+fn observe<R>(result: R) {
+    black_box(&result);
+}
+
 /// Collects [`Record`]s for one library.
 pub struct Suite {
     lib: String,
@@ -212,7 +223,7 @@ impl Suite {
         let start = Instant::now();
         let mut iters = 0u64;
         while start.elapsed() < warm || iters < 3 {
-            black_box(f());
+            observe(f());
             iters += 1;
         }
         let per_iter = start.elapsed().as_nanos() as f64 / iters as f64;
@@ -224,7 +235,7 @@ impl Suite {
         while (start.elapsed() < self.opts.min_time || samples.len() < 15) && samples.len() < 20_000 {
             let t = Instant::now();
             for _ in 0..batch {
-                black_box(f());
+                observe(f());
             }
             samples.push(t.elapsed().as_nanos() as f64 / batch as f64);
         }
