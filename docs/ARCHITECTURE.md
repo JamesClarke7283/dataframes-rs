@@ -450,14 +450,19 @@ stops at AVX2.
 - **How a cache-resident input is split.** One thread per *physical* core, at
   most four, with exactly one equal chunk each: two hardware threads of a
   core share its cache and its path to it, and with one chunk per thread
-  nothing is taken over, so nothing changes cores. On Linux every worker is
-  kept to the hardware threads of one core, and the first workers to cores
-  other than the one the first parallel call came from
-  (`DATAFRAMES_HOME_CORES=0` leaves it to the scheduler): left alone, the
-  scheduler quite often wakes a worker on the second thread of the caller's
-  own core, where it adds nothing — on the runners that alone decided whether
-  the split halved the time or changed nothing. The calling thread is never
-  restricted. Per-thread partial results live on cache lines of their own.
+  nothing is taken over, so nothing changes cores. On Linux the first workers
+  — one for every physical core but the caller's — are each kept to the
+  hardware threads of one core (`DATAFRAMES_HOME_CORES=0` leaves it to the
+  scheduler): left alone, the scheduler quite often wakes a worker on the
+  second thread of the caller's own core, where it adds nothing — on the
+  runners that alone decided whether the split halved the time or changed
+  nothing. The calling thread is never restricted; when a job finds it on a
+  different core, the homes are rearranged around it (at most once a
+  millisecond). The remaining workers have no home, so that no core ever has
+  more threads tied to it than it can run at once — an earlier version that
+  gave every worker a home ran at half speed whenever the caller landed on a
+  core that two workers were tied to. Per-thread partial results live on
+  cache lines of their own.
   `rayon` is used for sorting only.
 
 ---
@@ -617,7 +622,7 @@ check ownership once, then run a plain loop over `&mut [T]`.
 | run-time CPU dispatch | one portable binary | one predictable branch per kernel call |
 | workers poll for 100 µs after a parallel region | a parallel region starts in a fraction of a microsecond, which makes cache-sized columns worth splitting at all | a burst of idle CPU after each region |
 | the split of a cache-resident column is decided by measurement | half the time where each core keeps its part; no two- to three-fold loss where the caller rewrites the column | fourteen timed or trial calls in up to 4096; a changed workload runs the wrong way for up to 4096 calls; the first calls of a loop run on one thread |
-| each worker keeps to one physical core (Linux) | a split with one helper always spans two cores | a worker cannot move off a core that another process is using; the policy then sees no gain and stops splitting |
+| one worker per other physical core has a home there (Linux) | a split with one helper per core spans distinct cores, none of them the caller's | such a worker cannot move off a core that another process is using; the policy then sees no gain and stops splitting |
 | no interior mutability in columns | `&column` is read-only to the optimiser; pointer and length stay in registers | a bitmap cannot cache a count lazily: it is computed when the bitmap is built, and large partial slices count on request |
 | frame filters block-wise over all columns | one pass, all cores, shared row-index lists | nullable and bit-packed columns take a column-wise path |
 

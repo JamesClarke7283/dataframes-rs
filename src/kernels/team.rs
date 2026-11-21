@@ -42,11 +42,11 @@
 //!   queue: they run their tasks on the calling thread.
 //! * [`warm`] wakes workers without giving them a job, for a caller that
 //!   wants its next job to find them polling.
-//! * On Linux every worker is kept to the hardware threads of one physical
-//!   core, and the first workers to cores other than the one the team was
-//!   started from, so that "one helper" means "a second core" and not "the
-//!   other half of mine". `DATAFRAMES_HOME_CORES=0` leaves the placement to
-//!   the scheduler.
+//! * On Linux the first workers — one for every physical core but the
+//!   caller's — are kept to one core each, so that "one helper" means "a
+//!   second core" and not "the other half of mine"; when the caller turns up
+//!   on another core, they move. `DATAFRAMES_HOME_CORES=0` leaves the
+//!   placement to the scheduler.
 //!
 //! A panic in a task cancels the tasks not yet claimed and is re-raised on
 //! the caller once all helpers have left.
@@ -55,7 +55,7 @@ use std::any::Any;
 use std::cell::{Cell, UnsafeCell};
 use std::mem::DropGuard;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
@@ -105,6 +105,8 @@ struct Shared {
     panic: Mutex<Option<Box<dyn Any + Send>>>,
     /// Whether `panic` holds a payload: lets a job that went well skip the lock.
     panicked: AtomicBool,
+    /// Where the first workers live, if that is managed.
+    homes: Option<Homes>,
     spin: Duration,
 }
 
@@ -207,48 +209,142 @@ fn core_sets() -> Option<Vec<Vec<usize>>> {
     None
 }
 
-/// The CPUs each of `workers` workers is kept to: all hardware threads of
-/// one physical core, its *home*. Empty if workers are left to the scheduler
-/// (`DATAFRAMES_HOME_CORES=0`, a single core, or a system that does not
-/// tell).
+/// The least time between two rearrangements of the workers' homes: a caller
+/// that hops between cores, or several that take turns, is not chased.
+const REHOME_NANOS: u64 = 1_000_000;
+
+/// Where the first workers live: one physical core each, none of them the
+/// calling thread's.
 ///
-/// The first workers get one core each, starting after the core this thread
-/// — the one that makes the first parallel call — is running on; further
-/// workers go round again, to the second hardware threads. A job that wants
-/// one helper per core therefore finds its helpers on cores other than the
-/// caller's and other than each other's. Left alone, the scheduler places a
-/// woken worker wherever is convenient at that moment, quite often on the
-/// second thread of the caller's own core, where it shares the caller's
-/// cache and adds nothing; measured on the benchmark runners, that alone
-/// decided whether splitting a cache-resident column halved its time or
-/// changed nothing.
+/// Left alone, the scheduler places a woken worker wherever is convenient at
+/// that moment, quite often on the second hardware thread of the caller's own
+/// core, where it shares the caller's cache and adds nothing; measured on the
+/// benchmark runners, that alone decided whether splitting a cache-resident
+/// column halved its time or changed nothing. So worker `k`, for as many
+/// workers as there are *other* cores, is kept to the hardware threads of
+/// the `k + 1`-th core after the caller's: a job that wants one helper per
+/// core finds its helpers on cores other than the caller's and other than
+/// each other's.
 ///
-/// A worker may still use either thread of its core, and the calling thread
-/// is never restricted: if it ends up on a worker's core the scheduler is
-/// free to move it away.
-#[cfg(target_os = "linux")]
-fn home_cores(workers: usize) -> Vec<Vec<usize>> {
-    if std::env::var("DATAFRAMES_HOME_CORES").is_ok_and(|v| v.trim() == "0") {
-        return Vec::new();
+/// The calling thread is never restricted, and it may move. When a job
+/// finds it on another core than the homes were arranged around, the homes
+/// are rearranged ([`Homes::follow`]). The remaining workers — the ones that
+/// make up the second hardware threads — have no home: wherever the caller
+/// is, no core then has more threads tied to it than it can run at once.
+struct Homes {
+    /// The CPUs of every physical core this process may use.
+    cores: Vec<Vec<usize>>,
+    /// CPU number to index into `cores` (`u16::MAX`: not ours).
+    core_of: Vec<u16>,
+    /// The core the homes are arranged around.
+    base: AtomicUsize,
+    /// Kernel thread ids of the workers with a home; 0 until they run.
+    tids: Vec<AtomicI32>,
+    /// When the homes were last rearranged, in nanoseconds since `since`.
+    moved: AtomicU64,
+    since: Instant,
+}
+
+impl Homes {
+    /// Homes for the first of `workers` workers, arranged around the calling
+    /// thread. `None` if workers are left to the scheduler
+    /// (`DATAFRAMES_HOME_CORES=0`, a single core, or a system that does not
+    /// tell which CPUs share one).
+    fn new(workers: usize) -> Option<Self> {
+        if std::env::var("DATAFRAMES_HOME_CORES").is_ok_and(|v| v.trim() == "0") {
+            return None;
+        }
+        let cores = core_sets().filter(|cores| (2..usize::from(u16::MAX)).contains(&cores.len()))?;
+        let mut core_of = vec![u16::MAX; cores.iter().flatten().max()? + 1];
+        for (core, cpus) in cores.iter().enumerate() {
+            for &cpu in cpus {
+                core_of[cpu] = core as u16;
+            }
+        }
+        let homed = workers.min(cores.len() - 1);
+        let homes = Self {
+            cores,
+            core_of,
+            base: AtomicUsize::new(0),
+            tids: (0..homed).map(|_| AtomicI32::new(0)).collect(),
+            moved: AtomicU64::new(0),
+            since: Instant::now(),
+        };
+        homes.base.store(homes.core_here().unwrap_or(0), Ordering::Relaxed);
+        Some(homes)
     }
-    let Some(cores) = core_sets().filter(|cores| cores.len() >= 2) else {
-        return Vec::new();
-    };
+
+    /// The core the calling thread is running on right now.
+    fn core_here(&self) -> Option<usize> {
+        let core = *self.core_of.get(current_cpu()?)?;
+        (core != u16::MAX).then_some(usize::from(core))
+    }
+
+    /// The CPUs of worker `worker`'s home when the caller is on core `base`.
+    fn home(&self, worker: usize, base: usize) -> &[usize] {
+        &self.cores[(base + 1 + worker) % self.cores.len()]
+    }
+
+    /// Called by worker `worker` when it starts.
+    fn move_in(&self, worker: usize) {
+        if let Some(tid) = self.tids.get(worker) {
+            tid.store(current_tid(), Ordering::Relaxed);
+            stay_on(0, self.home(worker, self.base.load(Ordering::Relaxed)));
+        }
+    }
+
+    /// Rearrange the homes if the calling thread is not on the core they
+    /// were arranged around. Called with the job slot held, so by one thread
+    /// at a time; costs a few nanoseconds when there is nothing to do.
+    fn follow(&self) {
+        let Some(here) = self.core_here() else { return };
+        if here == self.base.load(Ordering::Relaxed) {
+            return;
+        }
+        let now = (self.since.elapsed().as_nanos() as u64).max(1);
+        let moved = self.moved.load(Ordering::Relaxed);
+        if moved != 0 && now.saturating_sub(moved) < REHOME_NANOS {
+            return;
+        }
+        self.moved.store(now, Ordering::Relaxed);
+        self.base.store(here, Ordering::Relaxed);
+        for (worker, tid) in self.tids.iter().enumerate() {
+            let tid = tid.load(Ordering::Relaxed);
+            if tid != 0 {
+                stay_on(tid, self.home(worker, here));
+            }
+        }
+    }
+}
+
+/// The CPU the calling thread is running on.
+#[cfg(target_os = "linux")]
+fn current_cpu() -> Option<usize> {
     // SAFETY: no arguments, no preconditions.
-    let here = unsafe { libc::sched_getcpu() };
-    let base = cores.iter().position(|cpus| cpus.iter().any(|&cpu| cpu as libc::c_int == here)).unwrap_or(0);
-    (0..workers).map(|k| cores[(base + 1 + k) % cores.len()].clone()).collect()
+    usize::try_from(unsafe { libc::sched_getcpu() }).ok()
 }
 
 #[cfg(not(target_os = "linux"))]
-fn home_cores(_workers: usize) -> Vec<Vec<usize>> {
-    Vec::new()
+fn current_cpu() -> Option<usize> {
+    None
 }
 
-/// Restrict the calling thread to `cpus`. Failure is harmless: the thread
-/// then runs wherever the scheduler puts it.
+/// The kernel's id of the calling thread.
 #[cfg(target_os = "linux")]
-fn stay_on(cpus: &[usize]) {
+fn current_tid() -> i32 {
+    // SAFETY: the call takes no arguments and cannot fail.
+    unsafe { libc::syscall(libc::SYS_gettid) as i32 }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_tid() -> i32 {
+    0
+}
+
+/// Restrict thread `tid` (0: the calling thread) to `cpus`. Failure is
+/// harmless: the thread then runs wherever the scheduler puts it.
+#[cfg(target_os = "linux")]
+fn stay_on(tid: i32, cpus: &[usize]) {
     // SAFETY: a zeroed CPU set is valid, every index is checked against its
     // size, and the call only reads it.
     unsafe {
@@ -256,12 +352,12 @@ fn stay_on(cpus: &[usize]) {
         for &cpu in cpus.iter().filter(|&&cpu| cpu < libc::CPU_SETSIZE as usize) {
             libc::CPU_SET(cpu, &mut set);
         }
-        libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set);
+        libc::sched_setaffinity(tid, size_of::<libc::cpu_set_t>(), &set);
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn stay_on(_cpus: &[usize]) {}
+fn stay_on(_tid: i32, _cpus: &[usize]) {}
 
 /// How long an idle worker polls for the next job before it goes to sleep.
 ///
@@ -297,16 +393,15 @@ fn team() -> Option<&'static Team> {
             handles: OnceLock::new(),
             panic: Mutex::new(None),
             panicked: AtomicBool::new(false),
+            homes: Homes::new(wanted),
             spin: spin_time(),
         });
-        let mut homes = home_cores(wanted).into_iter();
         let mut handles = Vec::with_capacity(wanted);
         for i in 0..wanted {
             let shared = Arc::clone(&shared);
-            let home = homes.next();
             let spawned = std::thread::Builder::new().name(format!("dataframes-{i}")).spawn(move || {
-                if let Some(cpus) = home {
-                    stay_on(&cpus);
+                if let Some(homes) = &shared.homes {
+                    homes.move_in(i);
                 }
                 worker_main(&shared, i)
             });
@@ -359,6 +454,9 @@ pub fn warm(helpers: usize) {
     let Some(team) = team() else { return };
     let Ok(_slot) = team.caller.try_lock() else { return };
     let s = &*team.shared;
+    if let Some(homes) = &s.homes {
+        homes.follow();
+    }
     if s.sleepers.load(Ordering::SeqCst) == 0 {
         return;
     }
@@ -400,6 +498,9 @@ pub fn run(tasks: usize, helpers: usize, wake_sleepers: bool, f: &Task<'_>) {
     let Some(team) = team() else { return inline() };
     let Ok(_slot) = team.caller.try_lock() else { return inline() };
     let s = &*team.shared;
+    if let Some(homes) = &s.homes {
+        homes.follow();
+    }
 
     // SAFETY: we hold the job slot, the previous job was closed and its
     // helpers have left (`run` does not return before), so nobody reads `job`.
@@ -616,25 +717,38 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn workers_get_one_home_core_each_before_any_core_gets_two() {
+    fn the_first_workers_live_on_the_cores_the_caller_is_not_on() {
         let Some(cores) = core_sets() else { return };
         assert!(cores.iter().all(|cpus| !cpus.is_empty()));
         assert_eq!(count_cores(), Some(cores.len()));
-        let homes = home_cores(2 * cores.len());
-        if cores.len() < 2 || std::env::var("DATAFRAMES_HOME_CORES").is_ok_and(|v| v.trim() == "0") {
-            assert!(homes.is_empty());
+        let Some(homes) = Homes::new(2 * cores.len()) else {
+            assert!(cores.len() < 2 || std::env::var("DATAFRAMES_HOME_CORES").is_ok_and(|v| v.trim() == "0"));
             return;
+        };
+        // One worker per other core; the rest are left to the scheduler, so
+        // that no core has more threads tied to it than it can run.
+        assert_eq!(homes.tids.len(), cores.len() - 1);
+        for base in 0..cores.len() {
+            let taken: Vec<&[usize]> = (0..homes.tids.len()).map(|k| homes.home(k, base)).collect();
+            assert!(taken.iter().all(|home| *home != cores[base].as_slice()), "a worker at home on the caller's core");
+            assert!(taken.iter().enumerate().all(|(i, home)| !taken[..i].contains(home)), "two workers on one core");
         }
-        assert_eq!(homes.len(), 2 * cores.len());
-        // Every home is one whole core.
-        assert!(homes.iter().all(|home| cores.contains(home)));
-        // The first workers are on distinct cores, and the core the team is
-        // started from is the last one to get a worker.
-        let first = &homes[..cores.len()];
-        assert!(first.iter().enumerate().all(|(i, home)| !first[..i].contains(home)));
-        assert!(homes.iter().zip(&homes[cores.len()..]).all(|(a, b)| a == b));
-        // Staying on one's own CPUs is always allowed.
-        std::thread::spawn(move || stay_on(&homes[0])).join().unwrap();
+        assert!(homes.core_here().is_some_and(|core| core < cores.len()));
+        // A worker moves in; then the caller turns up elsewhere and the homes
+        // follow (at most once per millisecond).
+        std::thread::scope(|scope| {
+            scope.spawn(|| homes.move_in(0)).join().unwrap();
+        });
+        assert_ne!(homes.tids[0].load(Ordering::Relaxed), 0);
+        // That thread is gone; do not let the test move whoever has its id now.
+        homes.tids[0].store(0, Ordering::Relaxed);
+        let elsewhere = (homes.base.load(Ordering::Relaxed) + 1) % cores.len();
+        homes.base.store(elsewhere, Ordering::Relaxed);
+        homes.follow();
+        assert_eq!(Some(homes.base.load(Ordering::Relaxed)), homes.core_here());
+        homes.base.store(elsewhere, Ordering::Relaxed);
+        homes.follow();
+        assert_eq!(homes.base.load(Ordering::Relaxed), elsewhere, "rearranged twice within a millisecond");
     }
 
     #[test]
