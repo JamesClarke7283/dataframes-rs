@@ -199,7 +199,7 @@ The implementation must balance extreme retrieval speeds with the complexity of 
 - **Offsets are applied when slicing, not when reading.** A view stores a pointer that is already offset, so reading through a slice costs exactly what reading the original costs. The price is one more word per handle than a bare `Arc`.
 - **One chunk per column.** Appending may reallocate (amortised, and in place when the buffer is uniquely owned or has spare capacity past every view), but element access never searches a chunk list.
 - **Layout guarantees live in one `unsafe impl`.** Kernels may assume alignment and the apron because `ColumnAlloc` promises them, instead of each call site re-proving it.
-- **Parallelism has to earn its keep.** Workers that poll briefly instead of sleeping make the hand-off cheap enough for cache-sized columns; the price is a burst of idle CPU after each parallel region (`DATAFRAMES_SPIN_US=0` turns it off). Kernels use one thread per physical core, and sleeping workers are woken only for inputs that repay the system call.
+- **Parallelism has to earn its keep.** Workers that poll briefly instead of sleeping make the hand-off cheap enough for cache-sized columns; the price is a burst of idle CPU after each parallel region (`DATAFRAMES_SPIN_US=0` turns it off). Sleeping workers are woken only for inputs that repay the system call.
 - **Determinism is kept where it is cheap.** Parallel filters produce the sequential result byte for byte; floating-point sums use a fixed association order and are bit-identical across thread counts and vector widths.
 - **No hidden global state on the hot path.** CPU features, cache sizes and the thread pool are resolved once; afterwards a kernel call is a predictable branch away from its loop.
 

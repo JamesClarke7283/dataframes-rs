@@ -68,46 +68,14 @@ pub fn threads() -> usize {
     team::threads()
 }
 
-/// Hardware threads per physical core (2 with SMT / Hyper-Threading, else 1).
-pub fn threads_per_core() -> usize {
-    static CACHED: AtomicUsize = AtomicUsize::new(0);
-    match CACHED.load(Ordering::Relaxed) {
-        0 => {
-            let n = detect_threads_per_core().clamp(1, 8);
-            CACHED.store(n, Ordering::Relaxed);
-            n
-        }
-        n => n,
-    }
-}
-
-fn detect_threads_per_core() -> usize {
-    #[cfg(target_os = "linux")]
-    if let Ok(list) = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list") {
-        // Either "0,4" or "0-1" (or just "0").
-        let mut n = 0;
-        for part in list.trim().split(',') {
-            n += match part.split_once('-') {
-                Some((a, b)) => match (a.parse::<usize>(), b.parse::<usize>()) {
-                    (Ok(a), Ok(b)) if b >= a => b - a + 1,
-                    _ => 1,
-                },
-                None => 1,
-            };
-        }
-        if n > 0 {
-            return n;
-        }
-    }
-    1
-}
-
-/// Threads the kernels use: one per physical core.
+/// Threads a kernel spreads its input over, the calling thread included.
 ///
-/// Two hardware threads on one core share its L1/L2 and its memory bandwidth,
-/// so for streaming kernels the second thread adds contention, not throughput.
-/// The `DATAFRAMES_MEMORY_THREADS` environment variable overrides the count
-/// (at most [`threads`]).
+/// Every hardware thread by default. Whether the second thread of a core
+/// helps a memory-bound kernel depends on the machine; measured on the
+/// benchmark runner (2 cores, 4 threads) it never hurt and bought up to 30 %
+/// on multi-column filters. The `DATAFRAMES_MEMORY_THREADS` environment
+/// variable overrides the count (at most [`threads`]), for instance to keep
+/// to one thread per physical core.
 #[inline]
 pub fn memory_threads() -> usize {
     static CACHED: AtomicUsize = AtomicUsize::new(0);
@@ -117,7 +85,7 @@ pub fn memory_threads() -> usize {
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|&n| n >= 1)
-                .unwrap_or_else(|| threads() / threads_per_core())
+                .unwrap_or_else(threads)
                 .clamp(1, threads());
             CACHED.store(n, Ordering::Relaxed);
             n

@@ -380,8 +380,10 @@ written once and re-instantiated inside a `#[target_feature]` wrapper
 - Sums, means, minima and maxima are reduced piece by piece (16 384 rows per
   piece) in a fixed association order: a floating-point sum is bit-identical
   whatever the number of threads or the vector width.
-- Kernels use one thread per physical core: SMT siblings add contention, not
-  bandwidth. The input is cut into a few chunks per thread, claimed
+- Kernels use every hardware thread by default (`DATAFRAMES_MEMORY_THREADS`
+  restricts them, e.g. to one per physical core; on the benchmark runner the
+  second thread of a core never hurt and bought up to 30 % on multi-column
+  filters). The input is cut into a few chunks per thread, claimed
   dynamically, so a slow or late thread does not hold the others up.
 - **The team.** General-purpose pools put idle workers to sleep at once, and
   waking one costs tens of microseconds — longer than most operations on a
@@ -547,7 +549,7 @@ check ownership once, then run a plain loop over `&mut [T]`.
 | snapshot isolation for shared mutation | readers never block; atomic multi-column writes | one writer at a time; a writer copies the columns it changes |
 | fixed association order for float reductions | bit-identical results across threads and CPUs | cannot use the fastest order on each machine |
 | run-time CPU dispatch | one portable binary | one predictable branch per kernel call |
-| workers poll for 100 µs after a parallel region | columns from 64 KiB use every core; a region starts in under a microsecond | a burst of idle CPU after each region; one extra thread per core |
+| workers poll for 100 µs after a parallel region | columns from 64 KiB use every core; a region starts in under a microsecond | a burst of idle CPU after each region |
 | no interior mutability in columns | `&column` is read-only to the optimiser; pointer and length stay in registers | a bitmap cannot cache a count lazily: it is computed when the bitmap is built, and large partial slices count on request |
 | frame filters block-wise over all columns | one pass, all cores, shared row-index lists | nullable and bit-packed columns take a column-wise path |
 
