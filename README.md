@@ -253,6 +253,19 @@ Every number behind the charts, per library: [bench/results/latest.md](bench/res
 - **Interleaved runs.** Libraries take turns case by case, for several rounds, so frequency scaling, thermal limits and noisy neighbours hit all of them alike. The reported time is the best median over the rounds.
 - **Level means level.** A difference below 5 % — about what identical code varies by between two processes on a shared cloud machine — is reported as level, not as a win. So is a difference that does not show in every round: each round is a fresh process for every library, and a best time that one lucky process reached and the next did not is noise, whichever library it flatters. The workflow fails on any case that is slower. Some cases can only be level: a point look-up is a bounds check and a load in every library.
 - **Runners differ.** GitHub-hosted runners are several CPU models — AMD Zen 3 (AVX2 only), Zen 4 and Zen 5, Intel Ice Lake, Emerald Rapids and Granite Rapids (all with AVX-512) have turned up, with private caches from 512 KiB to 2 MiB, and what is fastest on one is not on another. The block above names the machine of the last run; the [probe workflow](.github/workflows/probe.yml) reruns the whole suite on a chosen model.
+
+  The whole suite on every CPU model that turned up in one batch of sixteen probe runs (commit `b032b94`, 21 November 2026, three rounds each):
+
+  | runner CPU | runs | fastest in, of 75 | level | slower | geometric-mean speed-up |
+  |---|---:|---:|---:|---:|---:|
+  | AMD EPYC 7763 (Zen 3, AVX2 only) | 4 | 74 – 75 | 0 – 1 | 0 | 2.71x – 2.84x |
+  | AMD EPYC 9V74 (Zen 4) | 3 | 73 | 2 | 0 | 2.26x – 2.47x |
+  | AMD EPYC 9V45 (Zen 5) | 2 | 72 – 74 | 1 – 3 | 0 | 2.14x – 2.16x |
+  | Intel Xeon Platinum 8573C (Emerald Rapids) | 1 | 74 | 1 | 0 | 2.55x |
+  | Intel Xeon 6973P-C (Granite Rapids) | 1 | 73 | 2 | 0 | 2.52x |
+  | Intel Xeon 6975P-C (Granite Rapids) | 5 | 72 – 75 | 0 – 3 | 0 | 2.42x – 2.54x |
+
+  The level cases: the thousand point look-ups on four of the six models (on the 6975P-C at ten million rows arrow-rs took 0.53 µs in some processes and 0.78 µs in others, dataframes 0.56 µs in all of them), three reductions over ten million rows on the Zen 5, where two cores share one memory bus and a round now and then ties, and one 10 ns slice.
 - **Nothing is switched on for the benchmark.** dataframes runs with its defaults. Two of them matter in a timing loop: its worker threads keep polling for 100 µs after a call, so back-to-back calls always find them awake, and a loop that repeats one call on one column is exactly the case in which splitting a small column pays, which the library finds out within a few dozen calls. Set `DATAFRAMES_SPIN_US=0` or `DATAFRAMES_THREADS=1` to measure without them; [`scripts/tune.py`](scripts/tune.py) and the tuning workflow compare such settings side by side.
 
 **Run it yourself**
