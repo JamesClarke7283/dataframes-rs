@@ -1,94 +1,94 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="810" height="640" viewBox="0 0 810 640" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12">
-<style>.t{fill:#1f2328}.m{fill:#59636e}.g{stroke:#d1d9e0}.b{fill:#1f6feb}.l{fill:#cf222e}.e{fill:#9a6700}@media(prefers-color-scheme:dark){.t{fill:#f0f6fc}.m{fill:#9198a1}.g{stroke:#3d444d}.b{fill:#4493f8}.l{fill:#f85149}.e{fill:#d29922}}</style>
+<style>.t{fill:#1f2328}.m{fill:#59636e}.g{stroke:#d1d9e0}.b{fill:#1f6feb}.l{fill:#cf222e}.e{fill:#9a6700}.u{fill:#8c959f}@media(prefers-color-scheme:dark){.t{fill:#f0f6fc}.m{fill:#9198a1}.g{stroke:#3d444d}.b{fill:#4493f8}.l{fill:#f85149}.e{fill:#d29922}.u{fill:#6e7681}}</style>
 <text class="t" x="0" y="18" font-size="15" font-weight="600">Speed-up over the fastest competitor - 1M rows</text>
-<text class="m" x="0" y="36">competitor time / dataframes time, log scale; 1x = parity</text>
+<text class="m" x="0" y="36">competitor time / dataframes time, log scale; 1x = parity; grey = ahead by less than 5%</text>
 <line class="g" x1="300.0" y1="50" x2="300.0" y2="612" stroke-width="1"/>
 <text class="m" x="300.0" y="628" text-anchor="middle">0.5x</text>
-<line class="g" x1="364.4" y1="50" x2="364.4" y2="612" stroke-width="2"/>
-<text class="m" x="364.4" y="628" text-anchor="middle">1x</text>
-<line class="g" x1="428.9" y1="50" x2="428.9" y2="612" stroke-width="1"/>
-<text class="m" x="428.9" y="628" text-anchor="middle">2x</text>
-<line class="g" x1="493.3" y1="50" x2="493.3" y2="612" stroke-width="1"/>
-<text class="m" x="493.3" y="628" text-anchor="middle">4x</text>
-<line class="g" x1="557.7" y1="50" x2="557.7" y2="612" stroke-width="1"/>
-<text class="m" x="557.7" y="628" text-anchor="middle">8x</text>
-<line class="g" x1="622.1" y1="50" x2="622.1" y2="612" stroke-width="1"/>
-<text class="m" x="622.1" y="628" text-anchor="middle">16x</text>
-<line class="g" x1="686.6" y1="50" x2="686.6" y2="612" stroke-width="1"/>
-<text class="m" x="686.6" y="628" text-anchor="middle">32x</text>
+<line class="g" x1="364.3" y1="50" x2="364.3" y2="612" stroke-width="2"/>
+<text class="m" x="364.3" y="628" text-anchor="middle">1x</text>
+<line class="g" x1="428.6" y1="50" x2="428.6" y2="612" stroke-width="1"/>
+<text class="m" x="428.6" y="628" text-anchor="middle">2x</text>
+<line class="g" x1="492.9" y1="50" x2="492.9" y2="612" stroke-width="1"/>
+<text class="m" x="492.9" y="628" text-anchor="middle">4x</text>
+<line class="g" x1="557.2" y1="50" x2="557.2" y2="612" stroke-width="1"/>
+<text class="m" x="557.2" y="628" text-anchor="middle">8x</text>
+<line class="g" x1="621.5" y1="50" x2="621.5" y2="612" stroke-width="1"/>
+<text class="m" x="621.5" y="628" text-anchor="middle">16x</text>
+<line class="g" x1="685.8" y1="50" x2="685.8" y2="612" stroke-width="1"/>
+<text class="m" x="685.8" y="628" text-anchor="middle">32x</text>
 <text class="t" x="292" y="70" text-anchor="end">compare i64 column to scalar -&gt; mask</text>
-<rect class="b" x="364.4" y="59" width="59.5" height="14" rx="2"/>
-<text class="t" x="429.9" y="70">1.90x</text>
+<rect class="b" x="364.3" y="59" width="59.5" height="14" rx="2"/>
+<text class="t" x="429.8" y="70">1.90x</text>
 <text class="t" x="292" y="92" text-anchor="end">filter i64 column, 1% selected</text>
-<rect class="b" x="364.4" y="81" width="46.0" height="14" rx="2"/>
-<text class="t" x="416.4" y="92">1.64x</text>
+<rect class="b" x="364.3" y="81" width="45.4" height="14" rx="2"/>
+<text class="t" x="415.7" y="92">1.63x</text>
 <text class="t" x="292" y="114" text-anchor="end">filter i64 column, 10% selected</text>
-<rect class="b" x="364.4" y="103" width="65.1" height="14" rx="2"/>
-<text class="t" x="435.5" y="114">2.01x</text>
+<rect class="b" x="364.3" y="103" width="65.3" height="14" rx="2"/>
+<text class="t" x="435.6" y="114">2.02x</text>
 <text class="t" x="292" y="136" text-anchor="end">filter i64 column, 50% selected</text>
-<rect class="b" x="364.4" y="125" width="71.9" height="14" rx="2"/>
-<text class="t" x="442.3" y="136">2.17x</text>
+<rect class="b" x="364.3" y="125" width="71.9" height="14" rx="2"/>
+<text class="t" x="442.2" y="136">2.17x</text>
 <text class="t" x="292" y="158" text-anchor="end">filter i64 column, 90% selected</text>
-<rect class="b" x="364.4" y="147" width="69.6" height="14" rx="2"/>
-<text class="t" x="440.0" y="158">2.11x</text>
+<rect class="b" x="364.3" y="147" width="70.0" height="14" rx="2"/>
+<text class="t" x="440.3" y="158">2.13x</text>
 <text class="t" x="292" y="180" text-anchor="end">filter f64 column, 50% selected</text>
-<rect class="b" x="364.4" y="169" width="78.4" height="14" rx="2"/>
-<text class="t" x="448.9" y="180">2.33x</text>
+<rect class="b" x="364.3" y="169" width="79.1" height="14" rx="2"/>
+<text class="t" x="449.4" y="180">2.35x</text>
 <text class="t" x="292" y="202" text-anchor="end">filter i32 column, 50% selected</text>
-<rect class="b" x="364.4" y="191" width="81.7" height="14" rx="2"/>
-<text class="t" x="452.2" y="202">2.41x</text>
+<rect class="b" x="364.3" y="191" width="81.9" height="14" rx="2"/>
+<text class="t" x="452.2" y="202">2.42x</text>
 <text class="t" x="292" y="224" text-anchor="end">filter f32 column, 50% selected</text>
-<rect class="b" x="364.4" y="213" width="83.7" height="14" rx="2"/>
-<text class="t" x="454.2" y="224">2.46x</text>
+<rect class="b" x="364.3" y="213" width="83.8" height="14" rx="2"/>
+<text class="t" x="454.1" y="224">2.47x</text>
 <text class="t" x="292" y="246" text-anchor="end">filter 6-column frame by mask, 10%</text>
-<rect class="b" x="364.4" y="235" width="39.1" height="14" rx="2"/>
-<text class="t" x="409.5" y="246">1.52x</text>
+<rect class="b" x="364.3" y="235" width="44.3" height="14" rx="2"/>
+<text class="t" x="414.6" y="246">1.61x</text>
 <text class="t" x="292" y="268" text-anchor="end">filter 6-column frame by mask, 50%</text>
-<rect class="b" x="364.4" y="257" width="32.1" height="14" rx="2"/>
-<text class="t" x="402.5" y="268">1.41x</text>
+<rect class="b" x="364.3" y="257" width="26.8" height="14" rx="2"/>
+<text class="t" x="397.1" y="268">1.33x</text>
 <text class="t" x="292" y="290" text-anchor="end">filter frame with a string column, 50%</text>
-<rect class="b" x="364.4" y="279" width="39.8" height="14" rx="2"/>
-<text class="t" x="410.2" y="290">1.53x</text>
+<rect class="b" x="364.3" y="279" width="38.2" height="14" rx="2"/>
+<text class="t" x="408.5" y="290">1.51x</text>
 <text class="t" x="292" y="312" text-anchor="end">filter 6-column frame by expression, 50%</text>
-<rect class="b" x="364.4" y="301" width="30.8" height="14" rx="2"/>
-<text class="t" x="401.2" y="312">1.39x</text>
+<rect class="b" x="364.3" y="301" width="25.9" height="14" rx="2"/>
+<text class="t" x="396.2" y="312">1.32x</text>
 <text class="t" x="292" y="334" text-anchor="end">filter frame by `a &lt; x &amp; b &lt; y`, 25%</text>
-<rect class="b" x="364.4" y="323" width="37.2" height="14" rx="2"/>
-<text class="t" x="407.6" y="334">1.49x</text>
+<rect class="b" x="364.3" y="323" width="37.6" height="14" rx="2"/>
+<text class="t" x="407.9" y="334">1.50x</text>
 <text class="t" x="292" y="356" text-anchor="end">sum of one column over filtered rows</text>
-<rect class="b" x="364.4" y="345" width="129.6" height="14" rx="2"/>
-<text class="t" x="500.0" y="356">4.03x</text>
+<rect class="b" x="364.3" y="345" width="128.6" height="14" rx="2"/>
+<text class="t" x="498.9" y="356">4.00x</text>
 <text class="t" x="292" y="378" text-anchor="end">slice 6-column frame (zero-copy)</text>
-<rect class="b" x="364.4" y="367" width="353.5" height="14" rx="2"/>
-<text class="t" x="723.9" y="378">44.82x</text>
+<rect class="b" x="364.3" y="367" width="354.0" height="14" rx="2"/>
+<text class="t" x="724.3" y="378">45.43x</text>
 <text class="t" x="292" y="400" text-anchor="end">head(10) of 6-column frame</text>
-<rect class="b" x="364.4" y="389" width="355.6" height="14" rx="2"/>
-<text class="t" x="726.0" y="400">45.85x</text>
+<rect class="b" x="364.3" y="389" width="355.7" height="14" rx="2"/>
+<text class="t" x="726.0" y="400">46.27x</text>
 <text class="t" x="292" y="422" text-anchor="end">slice one column (zero-copy)</text>
-<rect class="b" x="364.4" y="411" width="22.9" height="14" rx="2"/>
-<text class="t" x="393.4" y="422">1.28x</text>
+<rect class="b" x="364.3" y="411" width="24.0" height="14" rx="2"/>
+<text class="t" x="394.3" y="422">1.30x</text>
 <text class="t" x="292" y="444" text-anchor="end">1000 random point look-ups in a column</text>
-<rect class="e" x="364.4" y="433" width="3.5" height="14" rx="2"/>
-<text class="t" x="373.9" y="444">1.04x</text>
+<rect class="u" x="364.3" y="433" width="3.5" height="14" rx="2"/>
+<text class="t" x="373.8" y="444">1.04x</text>
 <text class="t" x="292" y="466" text-anchor="end">1000 random cell look-ups by column name</text>
-<rect class="b" x="364.4" y="455" width="44.8" height="14" rx="2"/>
-<text class="t" x="415.2" y="466">1.62x</text>
+<rect class="b" x="364.3" y="455" width="50.9" height="14" rx="2"/>
+<text class="t" x="421.2" y="466">1.73x</text>
 <text class="t" x="292" y="488" text-anchor="end">sum of i64 column</text>
-<rect class="b" x="364.4" y="477" width="60.8" height="14" rx="2"/>
-<text class="t" x="431.3" y="488">1.92x</text>
+<rect class="b" x="364.3" y="477" width="60.6" height="14" rx="2"/>
+<text class="t" x="430.9" y="488">1.92x</text>
 <text class="t" x="292" y="510" text-anchor="end">sum of f64 column</text>
-<rect class="b" x="364.4" y="499" width="61.2" height="14" rx="2"/>
-<text class="t" x="431.6" y="510">1.93x</text>
+<rect class="b" x="364.3" y="499" width="61.2" height="14" rx="2"/>
+<text class="t" x="431.5" y="510">1.93x</text>
 <text class="t" x="292" y="532" text-anchor="end">mean of f64 column</text>
-<rect class="b" x="364.4" y="521" width="61.5" height="14" rx="2"/>
-<text class="t" x="432.0" y="532">1.94x</text>
+<rect class="b" x="364.3" y="521" width="61.1" height="14" rx="2"/>
+<text class="t" x="431.4" y="532">1.93x</text>
 <text class="t" x="292" y="554" text-anchor="end">min and max of f64 column</text>
-<rect class="b" x="364.4" y="543" width="58.5" height="14" rx="2"/>
-<text class="t" x="428.9" y="554">1.88x</text>
+<rect class="b" x="364.3" y="543" width="58.9" height="14" rx="2"/>
+<text class="t" x="429.2" y="554">1.89x</text>
 <text class="t" x="292" y="576" text-anchor="end">min and max of i64 column</text>
-<rect class="b" x="364.4" y="565" width="56.0" height="14" rx="2"/>
-<text class="t" x="426.4" y="576">1.83x</text>
+<rect class="b" x="364.3" y="565" width="56.4" height="14" rx="2"/>
+<text class="t" x="426.7" y="576">1.84x</text>
 <text class="t" x="292" y="598" text-anchor="end">in-place update x = x*c + d</text>
-<rect class="b" x="364.4" y="587" width="59.4" height="14" rx="2"/>
-<text class="t" x="429.8" y="598">1.90x</text>
+<rect class="b" x="364.3" y="587" width="60.1" height="14" rx="2"/>
+<text class="t" x="430.4" y="598">1.91x</text>
 </svg>
