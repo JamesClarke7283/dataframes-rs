@@ -146,34 +146,23 @@ fn main() -> PolarsResult<()> {
         || {
             let mut acc = 0i64;
             for &i in &ds.lookups {
-                if let Some(v) = e.get(black_box(i as usize)) {
-                    acc = acc.wrapping_add(v);
-                }
+                acc = acc.wrapping_add(e.get(black_box(i as usize)).unwrap_or(0));
             }
             acc
         },
         |acc| acc as f64,
     );
     // The same question asked once instead of a thousand times: the values at
-    // those positions as a column, and their sum; with and without the
-    // bounds check that Polars lets a caller skip.
+    // those positions as a column, and their sum.
     let positions = IdxCa::from_vec("positions".into(), ds.lookups.clone());
     suite.bench("get_random_1k@take", || e.take(black_box(&positions)).unwrap().sum().unwrap_or(0), |acc| acc as f64);
-    suite.bench(
-        "get_random_1k@take_unchecked",
-        // SAFETY: every position is below the number of rows.
-        || unsafe { e.take_unchecked(black_box(&positions)) }.sum().unwrap_or(0),
-        |acc| acc as f64,
-    );
     suite.bench(
         "cell_random_1k",
         || {
             let mut acc = 0i64;
             for &i in &ds.lookups {
                 let column = num.column(black_box("e")).unwrap().i64().unwrap();
-                if let Some(v) = column.get(black_box(i as usize)) {
-                    acc = acc.wrapping_add(v);
-                }
+                acc = acc.wrapping_add(column.get(black_box(i as usize)).unwrap_or(0));
             }
             acc
         },

@@ -311,24 +311,6 @@ fn every_available_tier_matches_the_portable_kernels() {
     }
     let avx512 = level() >= Level::Avx512;
     let mut rng = Rng::new(71);
-    if avx512 {
-        // The vector gathers, called directly: whether the library uses
-        // them is decided by a measurement, and they must be right either way.
-        for n in [0usize, 1, 7, 8, 9, 16, 23, 1000] {
-            let table64: Vec<u64> = (0..5000u64).map(|i| i * 0x9E37_79B9 + 1).collect();
-            let table32: Vec<u32> = table64.iter().map(|&v| v as u32).collect();
-            let idx: Vec<u32> = (0..n).map(|_| rng.below(5000) as u32).collect();
-            let (mut got64, mut got32) = (vec![0u64; n], vec![0u32; n]);
-            // SAFETY: AVX-512 was detected; indices are below the table
-            // length and the outputs have `n` slots.
-            unsafe {
-                x86_512::gather8(table64.as_ptr(), &idx, got64.as_mut_ptr());
-                x86_512::gather4(table32.as_ptr(), &idx, got32.as_mut_ptr());
-            }
-            assert!(got64.iter().zip(&idx).all(|(&v, &i)| v == table64[i as usize]), "gather8, n {n}");
-            assert!(got32.iter().zip(&idx).all(|(&v, &i)| v == table32[i as usize]), "gather4, n {n}");
-        }
-    }
     for &n in &[64usize, 128, 1024, 4096, 4160] {
         let v64: Vec<i64> = (0..n).map(|_| rng.below(1000) as i64 - 500).collect();
         let v32: Vec<i32> = v64.iter().map(|&v| v as i32).collect();

@@ -189,80 +189,25 @@ pub unsafe fn take_unchecked<T: Pod>(values: &[T], indices: &[u32]) -> AlignedVe
 
 /// `dst[j] = values[indices[j]]`.
 ///
+/// One ordinary load per element, on purpose. Left to itself the compiler
+/// turns this loop into vector gather instructions wherever the target has
+/// them, and on the CPUs that got a microcode fix for the gather side
+/// channel (Skylake to Ice Lake) those are several times slower than the
+/// loads they replace - a 1000-row `take` took 2 µs instead of 0.6 on an
+/// Ice Lake server. Where gathers are fast they bought nothing measurable
+/// either: the loads miss the first-level cache and wait for that. A
+/// volatile read is a plain load that the compiler leaves alone.
+///
 /// # Safety
 /// Every index must be below `values.len()`; `dst.len() == indices.len()`.
 #[inline]
 unsafe fn gather_into<T: Pod>(values: &[T], indices: &[u32], dst: &mut [MaybeUninit<T>]) {
     debug_assert_eq!(dst.len(), indices.len());
-    #[cfg(target_arch = "x86_64")]
-    if level() >= Level::Avx512 && indices.len() >= 16 && vector_gather_pays() {
-        // SAFETY: AVX-512 was detected; `Pod` types of these sizes are plain
-        // bits, moved here as integers of the same width and at least the
-        // same alignment requirement as bytes; the rest is forwarded.
-        unsafe {
-            match size_of::<T>() {
-                8 => return super::x86_512::gather8(values.as_ptr().cast(), indices, dst.as_mut_ptr().cast()),
-                4 => return super::x86_512::gather4(values.as_ptr().cast(), indices, dst.as_mut_ptr().cast()),
-                _ => {}
-            }
-        }
+    let src = values.as_ptr();
+    for (d, &i) in dst.iter_mut().zip(indices) {
+        // SAFETY: guaranteed by the caller.
+        d.write(unsafe { src.add(i as usize).read_volatile() });
     }
-    with_simd(
-        #[inline(always)]
-        || {
-            for (d, &i) in dst.iter_mut().zip(indices) {
-                // SAFETY: guaranteed by the caller.
-                d.write(unsafe { *values.get_unchecked(i as usize) });
-            }
-        },
-    );
-}
-
-/// Whether the vector gather instruction beats one load per element on this
-/// CPU. It does by two to one on current Intel cores and by nothing, or less,
-/// on some AMD ones, so it is measured once (a few tens of microseconds) on a
-/// table that fits in the first-level cache.
-#[cfg(target_arch = "x86_64")]
-fn vector_gather_pays() -> bool {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static PAYS: OnceLock<bool> = OnceLock::new();
-    *PAYS.get_or_init(|| {
-        const N: usize = 1024;
-        const PASSES: usize = 8;
-        let table: Vec<u64> = (0..N as u64).collect();
-        let indices: Vec<u32> = (0..N as u32).map(|i| i.wrapping_mul(2_654_435_761) >> 22).collect();
-        let mut out = vec![0u64; N];
-        let mut best = [u128::MAX; 2];
-        for _ in 0..8 {
-            for (way, best) in best.iter_mut().enumerate() {
-                let start = Instant::now();
-                for _ in 0..PASSES {
-                    let (src, dst) = (std::hint::black_box(table.as_ptr()), out.as_mut_ptr());
-                    // SAFETY: the indices are below `N` (a 32-bit product
-                    // shifted down to ten bits) and both buffers hold `N`
-                    // elements; this is only reached with AVX-512 detected.
-                    unsafe {
-                        if way == 0 {
-                            with_simd(
-                                #[inline(always)]
-                                || {
-                                    for (j, &i) in indices.iter().enumerate() {
-                                        dst.add(j).write(src.add(i as usize).read());
-                                    }
-                                },
-                            );
-                        } else {
-                            super::x86_512::gather8(src, &indices, dst);
-                        }
-                    }
-                    std::hint::black_box(&mut out);
-                }
-                *best = (*best).min(start.elapsed().as_nanos());
-            }
-        }
-        best[1] * 10 <= best[0] * 9
-    })
 }
 
 #[cfg(test)]

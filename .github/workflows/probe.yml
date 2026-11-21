@@ -24,7 +24,7 @@ on:
         description: "compare (all libraries), tune (settings of dataframes only) or kern (kernel timings)"
         default: "compare"
       cases:
-        description: Cases for tune mode or sections for kern mode, comma separated (empty for the default set)
+        description: Cases (compare and tune mode) or sections (kern mode), comma separated (empty for all)
         default: ""
       settings:
         description: Settings for tune mode, comma separated (empty for all)
@@ -110,7 +110,11 @@ jobs:
           ROWS: ${{ inputs.rows }}
           ROUNDS: ${{ inputs.rounds }}
           LIBS: ${{ inputs.libs }}
-        run: python3 scripts/bench.py run --per-case --rows "$ROWS" --rounds "$ROUNDS" --time-ms 200 --libs "$LIBS" --out probe/raw.jsonl
+          CASES: ${{ inputs.cases }}
+        run: |
+          args=(--per-case --rows "$ROWS" --rounds "$ROUNDS" --time-ms 200 --libs "$LIBS" --out probe/raw.jsonl)
+          if [ -n "$CASES" ]; then args+=(--case "$CASES"); fi
+          python3 scripts/bench.py run "${args[@]}"
       - name: Report
         if: steps.machine.outputs.match == 'true' && inputs.mode == 'compare'
         run: |

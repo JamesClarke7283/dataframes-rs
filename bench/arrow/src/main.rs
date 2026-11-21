@@ -145,9 +145,7 @@ fn main() {
             let mut acc = 0i64;
             for &i in &ds.lookups {
                 let i = black_box(i as usize);
-                if e.is_valid(i) {
-                    acc = acc.wrapping_add(e.value(i));
-                }
+                acc = acc.wrapping_add(if e.is_valid(i) { e.value(i) } else { 0 });
             }
             acc
         },
