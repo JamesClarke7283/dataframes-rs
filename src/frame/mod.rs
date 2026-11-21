@@ -6,8 +6,8 @@
 //! whatever the number of columns; `select`, `hstack` and `drop` move the
 //! three-word buffer handles of the columns involved.
 //!
-//! Filtering runs block-wise over all columns at once (see
-//! `lazy::exec`): every core takes blocks of rows, and each block is written
+//! Filtering runs block-wise over all columns at once (see the `filter`
+//! submodule): every core takes blocks of rows, and each block is written
 //! to all output columns either through the mask or through one shared list
 //! of row indices, whichever is cheaper at that block's density.
 //!
@@ -15,6 +15,7 @@
 //! in the `pandas` submodule.
 
 mod display;
+pub(crate) mod filter;
 mod group_by;
 mod join;
 mod pandas;
@@ -734,7 +735,7 @@ impl DataFrame {
         // Block-wise over all columns at once: every core compacts blocks of
         // the whole row set into the shared outputs, through the mask or
         // through a per-block index list, whichever is cheaper for the block.
-        if let Some(out) = crate::lazy::exec::filter_by_words(self, &sel.words, sel.count) {
+        if let Some(out) = filter::filter_by_words(self, &sel.words, sel.count) {
             return out;
         }
         // Nullable or bit-packed columns: column by column.

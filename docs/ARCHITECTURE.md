@@ -54,8 +54,10 @@ what each application costs.
 
 ## 2. Module map
 
-Eight layers. A layer depends only on layers below it, which is what lets each
-be read, tested and replaced on its own.
+Eight layers. A layer builds on the layers below it, which is what lets each be
+read, tested and replaced on its own. (One reference points upwards: the
+marker types in `datatypes` name the column and series variants they belong
+to, as they do in Polars.)
 
 ```text
  7  sync           SharedFrame, Snapshot, FrameReader; partitioned mutation
@@ -75,7 +77,7 @@ be read, tested and replaced on its own.
 | `datatypes` | `mod.rs`, `any_value.rs`, `small_str.rs` | the logical vocabulary | storage |
 | `chunked_array` | `mod.rs`, `ops.rs`, `boolean.rs`, `string.rs` | typed columns: values + validity, and the typed operations on them | other columns |
 | `series` | `mod.rs`, `arithmetic.rs`, `comparison.rs`, `pandas.rs` | run-time typing and dispatch | frames |
-| `frame` | `mod.rs`, `sort.rs`, `group_by.rs`, `join.rs`, `display.rs`, `pandas.rs` | equal-length column sets and relational operations | query plans, threads |
+| `frame` | `mod.rs`, `filter.rs`, `sort.rs`, `group_by.rs`, `join.rs`, `display.rs`, `pandas.rs` | equal-length column sets, block-wise multi-column filtering, relational operations | query plans, threads |
 | `lazy` | `dsl.rs`, `eval.rs`, `exec.rs`, `frame.rs`, `query.rs` | expressions, plans, fused execution | — |
 | `sync` | `mod.rs` | versions, snapshots, writer serialisation | kernels |
 

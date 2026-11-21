@@ -65,7 +65,7 @@ fn main() -> PolarsResult<()> {
 
 ## Modular architecture
 
-Eight layers, each a module that depends only on the ones beneath it. A layer can be read, tested and replaced on its own.
+Eight layers, each a module that builds on the ones beneath it. A layer can be read, tested and replaced on its own.
 
 | layer | module | owns |
 |------:|--------|------|
