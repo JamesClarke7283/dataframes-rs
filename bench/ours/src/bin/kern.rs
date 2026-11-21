@@ -276,6 +276,24 @@ fn main() {
             report(&format!("plain sum, 1 thread, one huge page ({round})"), rows, time(|| sum_slice(black_box(huge))));
         }
     }
+    if want("lookup") {
+        // A thousand point look-ups at fixed random positions, the same in
+        // every call: into a column from the library's allocator (huge pages
+        // from 2 MiB) and into the same data in a plain vector (small pages).
+        let positions: Vec<u32> = (0..1000u64).map(|i| ((i * 0x9E37_79B9_7F4A_7C15) >> 11) as u32 % rows as u32).collect();
+        let plain: Vec<i64> = a.to_vec();
+        let look = |data: &[i64]| {
+            let mut acc = 0i64;
+            for &i in &positions {
+                acc = acc.wrapping_add(data.get(black_box(i as usize)).copied().unwrap_or(0));
+            }
+            acc
+        };
+        for round in 0..3 {
+            report(&format!("1000 look-ups, library column ({round})"), 1000, time(|| look(&a)));
+            report(&format!("1000 look-ups, plain vector ({round})"), 1000, time(|| look(&plain)));
+        }
+    }
     if want("filter") {
         // The way a column filters itself: a mask, then a compaction, each
         // asking the splitting policy on its own.
