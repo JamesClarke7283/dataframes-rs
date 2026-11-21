@@ -290,13 +290,13 @@ cmp_scalar_kernel!(
 // data-dependent branch; steps past the population count copy a harmless
 // element to slots beyond the output cursor.
 
-const M55: u64 = 0x5555_5555_5555_5555;
-const M33: u64 = 0x3333_3333_3333_3333;
-const M0F: u64 = 0x0F0F_0F0F_0F0F_0F0F;
-const M01: u64 = 0x0101_0101_0101_0101;
+pub(super) const M55: u64 = 0x5555_5555_5555_5555;
+pub(super) const M33: u64 = 0x3333_3333_3333_3333;
+pub(super) const M0F: u64 = 0x0F0F_0F0F_0F0F_0F0F;
+pub(super) const M01: u64 = 0x0101_0101_0101_0101;
 
 /// Mask words whose density is examined together to pick a strategy.
-const GROUP_WORDS: usize = 16;
+pub(super) const GROUP_WORDS: usize = 16;
 
 /// Compact the 64 eight-byte elements at `base` selected by `w` to `dst`.
 ///
@@ -362,7 +362,7 @@ unsafe fn dense_word4(w: u64, base: *const u32, dst: *mut u32) {
 /// `base` must be valid for 65 reads (a step past the last set bit reads
 /// element 64) and `dst` for `K` writes; BMI1 must be available.
 #[inline(always)]
-unsafe fn sparse_word<T: Copy, const K: usize>(w: u64, base: *const T, dst: *mut T) {
+pub(super) unsafe fn sparse_word<T: Copy, const K: usize>(w: u64, base: *const T, dst: *mut T) {
     let mut m = w;
     let mut j = 0;
     while j < K {
@@ -380,11 +380,12 @@ unsafe fn sparse_word<T: Copy, const K: usize>(w: u64, base: *const T, dst: *mut
 /// `ones` set bits (0: use the dense steps). `dense_cost` is the cost of a
 /// dense word in units of one sparse step.
 #[inline(always)]
-fn sparse_steps(ones: usize, words: usize, dense_cost: usize) -> usize {
-    // A step count is used when hardly any word of that density exceeds it.
-    if 2 * ones <= 3 * words {
+pub(super) fn sparse_steps(ones: usize, words: usize, dense_cost: usize) -> usize {
+    // A step count is used when it is cheaper than a dense word and hardly
+    // any word of the group's density has more set bits than steps.
+    if dense_cost > 4 && 2 * ones <= 3 * words {
         4
-    } else if ones <= 4 * words {
+    } else if dense_cost > 8 && ones <= 4 * words {
         8
     } else if dense_cost > 16 && 2 * ones <= 13 * words {
         12
@@ -394,12 +395,13 @@ fn sparse_steps(ones: usize, words: usize, dense_cost: usize) -> usize {
 }
 
 macro_rules! compact_kernel {
-    ($(#[$doc:meta])* $name:ident, $elem:ty, lanes = $lanes:expr, dense = $dense:ident, dense_cost = $cost:expr) => {
+    ($(#[$doc:meta])* $name:ident, $elem:ty, features = $features:literal, lanes = $lanes:expr, dense = $dense:ident, dense_cost = $cost:expr) => {
         $(#[$doc])*
         ///
         /// # Safety
-        /// As [`scalar::compact`], plus the CPU must support AVX2, BMI1 and POPCNT.
-        #[target_feature(enable = "avx2,bmi1,popcnt")]
+        /// As [`scalar::compact`], plus the CPU must support the instruction
+        /// sets this kernel is compiled for.
+        #[target_feature(enable = $features)]
         pub unsafe fn $name(values: *const $elem, mask: &[u64], n: usize, out: *mut $elem, out_cap: usize) -> usize {
             const LANES: usize = $lanes;
             let full = n / 64;
@@ -465,13 +467,15 @@ macro_rules! compact_kernel {
     };
 }
 
+pub(super) use compact_kernel;
+
 compact_kernel!(
     /// Compact 8-byte elements.
-    compact8, u64, lanes = 4, dense = dense_word8, dense_cost = 27
+    compact8, u64, features = "avx2,bmi1,popcnt", lanes = 4, dense = dense_word8, dense_cost = 27
 );
 compact_kernel!(
     /// Compact 4-byte elements.
-    compact4, u32, lanes = 8, dense = dense_word4, dense_cost = 16
+    compact4, u32, features = "avx2,bmi1,popcnt", lanes = 8, dense = dense_word4, dense_cost = 16
 );
 
 /// Compact 2-byte elements.
@@ -606,19 +610,19 @@ pub unsafe fn compact_bits(values: &[u64], mask: &[u64], n: usize, out_words: &m
 // so they need no apron and no slack between parallel tasks.
 
 /// Bytes accumulated in the staging buffer before it is flushed.
-const STAGE_BYTES: usize = 4096;
+pub(super) const STAGE_BYTES: usize = 4096;
 /// Staging buffer size: the flush threshold, plus one full mask word of the
-/// widest element (64 x 8 bytes), plus one vector of overhang.
-const STAGE_CAP: usize = STAGE_BYTES + 64 * 8 + 32;
+/// widest element (64 x 8 bytes), plus one 512-bit vector of overhang.
+const STAGE_CAP: usize = STAGE_BYTES + 64 * 8 + 64;
 
 #[repr(C, align(64))]
 struct Stage([std::mem::MaybeUninit<u8>; STAGE_CAP]);
 
 /// Destination cursor of a streaming kernel.
-struct StreamOut {
+pub(super) struct StreamOut {
     stage: Stage,
     /// Fill level of the stage, in bytes.
-    fill: usize,
+    pub(super) fill: usize,
     /// Destination address of `stage[0]`; always 64-byte aligned. It may lie
     /// up to 63 bytes before the output, so it is only ever combined with
     /// offsets through wrapping arithmetic and never dereferenced below `out`.
@@ -630,7 +634,7 @@ struct StreamOut {
 
 impl StreamOut {
     #[inline]
-    fn new(out: *mut u8) -> Self {
+    pub(super) fn new(out: *mut u8) -> Self {
         let skip = out as usize % 64;
         StreamOut {
             stage: Stage([std::mem::MaybeUninit::uninit(); STAGE_CAP]),
@@ -644,7 +648,7 @@ impl StreamOut {
     /// locals while they stage data, and fetch it again after every call
     /// that takes `&mut self`.
     #[inline(always)]
-    fn stage_ptr(&mut self) -> *mut u8 {
+    pub(super) fn stage_ptr(&mut self) -> *mut u8 {
         self.stage.0.as_mut_ptr().cast()
     }
 
@@ -655,7 +659,7 @@ impl StreamOut {
     /// AVX2 must be available and the destination valid for the staged bytes.
     #[inline]
     #[target_feature(enable = "avx2")]
-    unsafe fn flush_lines(&mut self) -> usize {
+    pub(super) unsafe fn flush_lines(&mut self) -> usize {
         let base = self.stage.0.as_mut_ptr().cast::<u8>();
         let lines = self.fill / 64;
         if lines == 0 {
@@ -698,7 +702,7 @@ impl StreamOut {
     /// As [`flush_lines`](Self::flush_lines).
     #[inline]
     #[target_feature(enable = "avx2")]
-    unsafe fn finish(&mut self) {
+    pub(super) unsafe fn finish(&mut self) {
         // SAFETY: as in `flush_lines`; the tail copies only staged bytes.
         unsafe {
             self.flush_lines();
@@ -715,7 +719,7 @@ impl StreamOut {
 }
 
 macro_rules! compact_stream_kernel {
-    ($(#[$doc:meta])* $name:ident, $elem:ty, dense = $dense:ident, dense_cost = $cost:expr) => {
+    ($(#[$doc:meta])* $name:ident, $elem:ty, features = $features:literal, dense = $dense:ident, dense_cost = $cost:expr) => {
         $(#[$doc])*
         ///
         /// Writes exactly one element per selected row and nothing else, and
@@ -725,11 +729,12 @@ macro_rules! compact_stream_kernel {
         /// * `values` must be valid for `n` reads and `mask` must cover `n` bits.
         /// * `out` must be valid for `out_cap` writes, aligned for the element
         ///   type, and must not overlap `values`.
-        /// * The CPU must support AVX2, BMI1 and POPCNT.
+        /// * The CPU must support the instruction sets this kernel is
+        ///   compiled for.
         /// * Non-temporal stores are weakly ordered: the calling thread must
         ///   execute `SFENCE` (see `pipeline::stream_fence`) before the output
         ///   is read by anyone. Drivers do this once per worker.
-        #[target_feature(enable = "avx2,bmi1,popcnt")]
+        #[target_feature(enable = $features)]
         pub unsafe fn $name(values: *const $elem, mask: &[u64], n: usize, out: *mut $elem, out_cap: usize) -> usize {
             const SIZE: usize = size_of::<$elem>();
             let full = n / 64;
@@ -834,13 +839,15 @@ macro_rules! compact_stream_kernel {
     };
 }
 
+pub(super) use compact_stream_kernel;
+
 compact_stream_kernel!(
     /// Streaming compaction of 8-byte elements.
-    compact8_stream, u64, dense = dense_word8, dense_cost = 27
+    compact8_stream, u64, features = "avx2,bmi1,popcnt", dense = dense_word8, dense_cost = 27
 );
 compact_stream_kernel!(
     /// Streaming compaction of 4-byte elements.
-    compact4_stream, u32, dense = dense_word4, dense_cost = 16
+    compact4_stream, u32, features = "avx2,bmi1,popcnt", dense = dense_word4, dense_cost = 16
 );
 
 /// `out[j] = src[idx[j]]`, written with non-temporal stores through the
