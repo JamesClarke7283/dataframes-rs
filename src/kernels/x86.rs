@@ -640,6 +640,14 @@ impl StreamOut {
         }
     }
 
+    /// Start of the staging buffer. Callers keep it (and the fill level) in
+    /// locals while they stage data, and fetch it again after every call
+    /// that takes `&mut self`.
+    #[inline(always)]
+    fn stage_ptr(&mut self) -> *mut u8 {
+        self.stage.0.as_mut_ptr().cast()
+    }
+
     /// Write the whole lines of the stage to the destination and keep the
     /// remainder. Returns the number of bytes moved out of the stage.
     ///
@@ -735,7 +743,7 @@ macro_rules! compact_stream_kernel {
                 // The stage fill level lives in a local so that it stays in a
                 // register across the steps of a word.
                 let mut fill = dst.fill;
-                let stage = dst.stage.0.as_mut_ptr().cast::<u8>();
+                let mut stage = dst.stage_ptr();
                 let mut count = 0usize;
                 let mut wi = 0;
                 'groups: while wi < n_words {
@@ -758,6 +766,7 @@ macro_rules! compact_stream_kernel {
                                     dst.fill = fill;
                                     dst.flush_lines();
                                     fill = dst.fill;
+                                    stage = dst.stage_ptr();
                                 }
                             }
                         };
@@ -811,6 +820,7 @@ macro_rules! compact_stream_kernel {
                                 dst.fill = fill;
                                 dst.flush_lines();
                                 fill = dst.fill;
+                                stage = dst.stage_ptr();
                             }
                         }
                         wi += 1;
@@ -852,7 +862,7 @@ pub unsafe fn gather_stream<T: Copy>(src: *const T, idx: &[u32], out: *mut T) {
     // batch adds at most `32 * 16` bytes, which its spare capacity covers.
     unsafe {
         let mut dst = StreamOut::new(out.cast());
-        let stage = dst.stage.0.as_mut_ptr().cast::<u8>();
+        let mut stage = dst.stage_ptr();
         let mut fill = dst.fill;
         for batch in idx.chunks(BATCH) {
             for &i in batch {
@@ -863,6 +873,7 @@ pub unsafe fn gather_stream<T: Copy>(src: *const T, idx: &[u32], out: *mut T) {
                 dst.fill = fill;
                 dst.flush_lines();
                 fill = dst.fill;
+                stage = dst.stage_ptr();
             }
         }
         dst.fill = fill;

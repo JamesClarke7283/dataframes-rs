@@ -133,7 +133,8 @@ pub(crate) fn emit_block(
 
 /// The rows of `df` whose bit is set in `words` (`count` of them), compacted
 /// block by block over all columns at once. `None` if some column cannot be
-/// written by independent blocks (nullable or bit-packed columns).
+/// written by independent blocks (nullable or bit-packed columns), or if
+/// `words` turns out to hold more set bits than `count`.
 pub(crate) fn filter_by_words(df: &DataFrame, words: &[u64], count: usize) -> Option<DataFrame> {
     let height = df.height();
     if df.width() == 0 || height == 0 {
@@ -156,7 +157,12 @@ pub(crate) fn filter_by_words(df: &DataFrame, words: &[u64], count: usize) -> Op
             emit_block(&sinks, rows, mask, offset, n, stream, &mut scratch.0);
         },
     );
-    debug_assert!(done.complete && done.total == count);
+    if !done.complete {
+        // More set bits than `count` announced: the caller's count was wrong.
+        // Only the blocks that fit were written; let the column-wise path,
+        // which counts for itself, produce the answer.
+        return None;
+    }
     let columns = sinks.into_iter().map(|s| s.finish(done.total)).collect();
     Some(DataFrame::from_parts(done.total, columns))
 }
