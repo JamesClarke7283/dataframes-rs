@@ -49,6 +49,7 @@ pub mod x86;
 pub mod x86_512;
 
 use std::cmp::Ordering as CmpOrdering;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use crate::memory::bitmap::count_ones_range;
@@ -613,20 +614,42 @@ pub fn cmp_scalar_mask_with<T: Kernel>(
     tasks: usize,
 ) -> (AlignedVec<u64>, usize) {
     let n = values.len();
-    let mut words: AlignedVec<u64> = zeroed_vec(words_for(n));
+    let len = words_for(n);
+    let mut words: AlignedVec<u64> = Vec::with_capacity_in(len, ColumnAlloc);
+    let slots = &mut words.spare_capacity_mut()[..len];
     let count = if tasks <= 1 || n < 128 {
-        T::cmp_scalar(values, op, rhs, &mut words)
+        T::cmp_scalar(values, op, rhs, cleared(slots))
     } else {
         let rows = par::chunk_rows(n, size_of::<T>(), tasks);
         let total = AtomicUsize::new(0);
-        par::for_each_chunk_mut(&mut words, rows / 64, tasks, |i, w| {
+        par::for_each_chunk_mut(slots, rows / 64, tasks, |i, w| {
             let start = i * rows;
-            let count = T::cmp_scalar(&values[start..(start + rows).min(n)], op, rhs, w);
+            let count = T::cmp_scalar(&values[start..(start + rows).min(n)], op, rhs, cleared(w));
             total.fetch_add(count, Ordering::Relaxed);
         });
         total.into_inner()
     };
+    // SAFETY: every one of the `len` words was cleared, by the thread that
+    // then wrote it.
+    unsafe { words.set_len(len) };
     (words, count)
+}
+
+/// Zero `slots` and hand them back as words.
+///
+/// The thread that will write a part of a mask clears it, not the caller for
+/// everybody: a buffer that comes back from the pool is in the caches of the
+/// cores that wrote it last time, part by part, and a caller that cleared all
+/// of it would pull the other threads' parts over to its own core only for
+/// them to be pulled back a moment later.
+#[inline]
+fn cleared(slots: &mut [MaybeUninit<u64>]) -> &mut [u64] {
+    // SAFETY: zero is a valid word; after the fill every slot is initialised,
+    // and `MaybeUninit<u64>` has the layout of `u64`.
+    unsafe {
+        std::ptr::write_bytes(slots.as_mut_ptr(), 0, slots.len());
+        &mut *(std::ptr::from_mut(slots) as *mut [u64])
+    }
 }
 
 /// `lhs[i] op rhs[i]` as mask words plus the number of matches.
@@ -636,21 +659,25 @@ pub fn cmp_scalar_mask_with<T: Kernel>(
 pub fn cmp_values_mask<T: Kernel>(lhs: &[T], rhs: &[T], op: CmpOp) -> (AlignedVec<u64>, usize) {
     assert_eq!(lhs.len(), rhs.len(), "comparison operands must have equal length");
     let n = lhs.len();
-    let mut words: AlignedVec<u64> = zeroed_vec(words_for(n));
+    let len = words_for(n);
+    let mut words: AlignedVec<u64> = Vec::with_capacity_in(len, ColumnAlloc);
+    let slots = &mut words.spare_capacity_mut()[..len];
     let plan = par::plan(n, 2 * size_of::<T>());
     let tasks = plan.tasks();
     let count = if tasks <= 1 || n < 128 {
-        T::cmp_values(lhs, rhs, op, &mut words)
+        T::cmp_values(lhs, rhs, op, cleared(slots))
     } else {
         let rows = par::chunk_rows(n, 2 * size_of::<T>(), tasks);
         let total = AtomicUsize::new(0);
-        par::for_each_chunk_mut(&mut words, rows / 64, tasks, |i, w| {
+        par::for_each_chunk_mut(slots, rows / 64, tasks, |i, w| {
             let range = i * rows..((i + 1) * rows).min(n);
-            let count = T::cmp_values(&lhs[range.clone()], &rhs[range], op, w);
+            let count = T::cmp_values(&lhs[range.clone()], &rhs[range], op, cleared(w));
             total.fetch_add(count, Ordering::Relaxed);
         });
         total.into_inner()
     };
+    // SAFETY: as in `cmp_scalar_mask_with`.
+    unsafe { words.set_len(len) };
     (words, count)
 }
 
