@@ -3,7 +3,7 @@
   "cpu": "AMD EPYC 7763 64-Core Processor",
   "threads": 4,
   "os": "Linux 7.0.0-1020-azure",
-  "when": "2026-11-21 02:56 UTC",
+  "when": "2026-11-21 04:01 UTC",
   "versions": {
    "Polars (Rust crate)": "0.55.2",
    "Arrow (arrow-rs)": "60.1.0",
@@ -17,65 +17,63 @@
    "rows": 100000,
    "case": "mask_i64",
    "ns": {
-    "dataframes": 12468.0,
-    "polars": 55564.0,
-    "arrow-rs": 10354.5,
-    "pandas": 52127.0,
-    "polars-py": 20208.0
+    "dataframes": 6856.0,
+    "polars": 55615.0,
+    "arrow-rs": 10319.0,
+    "pandas": 51977.0,
+    "polars-py": 21289.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 0.8304860442733397,
+   "speedup": 1.5051050175029173,
    "checks_agree": true,
-   "verdict": "loss"
+   "verdict": "win"
   },
   {
    "rows": 100000,
    "case": "filter_i64_1pct",
    "ns": {
-    "dataframes": 15990.0,
-    "polars": 59090.0,
-    "arrow-rs": 13415.0,
-    "pandas": 191517.0,
-    "polars-py": 25728.0
+    "dataframes": 11040.5,
+    "polars": 59281.0,
+    "arrow-rs": 13490.0,
+    "pandas": 189544.0,
+    "polars-py": 25838.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 0.8389618511569731,
+   "speedup": 1.2218649517684887,
    "checks_agree": true,
-   "verdict": "loss"
+   "verdict": "win"
   },
   {
    "rows": 100000,
    "case": "filter_i64_10pct",
    "ns": {
-    "dataframes": 32801.0,
-    "polars": 67656.0,
-    "arrow-rs": 22862.0,
-    "pandas": 403820.0,
-    "polars-py": 35726.0
+    "dataframes": 18033.0,
+    "polars": 67156.0,
+    "arrow-rs": 22793.0,
+    "pandas": 400507.0,
+    "polars-py": 36158.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 0.6969909453980062,
+   "speedup": 1.2639605168302557,
    "checks_agree": true,
-   "verdict": "loss"
+   "verdict": "win"
   },
   {
    "rows": 100000,
    "case": "filter_i64_50pct",
    "ns": {
-    "dataframes": 36177.0,
-    "polars": 90007.0,
-    "arrow-rs": 67055.0,
-    "pandas": 724974.0,
-    "polars-py": 61644.0
+    "dataframes": 21119.0,
+    "polars": 89858.0,
+    "arrow-rs": 67065.0,
+    "pandas": 725304.0,
+    "polars-py": 62036.0
    },
-   "variant": {
-    "dataframes": "fused"
-   },
+   "variant": {},
    "fastest_rival": "polars-py",
-   "speedup": 1.7039555518699727,
+   "speedup": 2.9374496898527394,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -83,17 +81,15 @@
    "rows": 100000,
    "case": "filter_i64_90pct",
    "ns": {
-    "dataframes": 36799.0,
-    "polars": 90748.0,
-    "arrow-rs": 66143.0,
-    "pandas": 1346308.0,
-    "polars-py": 61385.0
+    "dataframes": 21760.0,
+    "polars": 90870.0,
+    "arrow-rs": 66113.0,
+    "pandas": 1331526.0,
+    "polars-py": 61775.0
    },
-   "variant": {
-    "dataframes": "fused"
-   },
+   "variant": {},
    "fastest_rival": "polars-py",
-   "speedup": 1.6681159814125384,
+   "speedup": 2.838924632352941,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -101,15 +97,15 @@
    "rows": 100000,
    "case": "filter_f64_50pct",
    "ns": {
-    "dataframes": 36459.0,
-    "polars": 95318.0,
-    "arrow-rs": 64691.0,
-    "pandas": 724452.0,
-    "polars-py": 64750.0
+    "dataframes": 21300.0,
+    "polars": 95419.0,
+    "arrow-rs": 64832.0,
+    "pandas": 725214.0,
+    "polars-py": 64911.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 1.7743492690419376,
+   "speedup": 3.043755868544601,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -117,17 +113,15 @@
    "rows": 100000,
    "case": "filter_i32_50pct",
    "ns": {
-    "dataframes": 17462.0,
-    "polars": 91239.0,
-    "arrow-rs": 62817.0,
-    "pandas": 726215.0,
-    "polars-py": 55474.0
+    "dataframes": 12624.0,
+    "polars": 91110.0,
+    "arrow-rs": 62807.0,
+    "pandas": 724403.0,
+    "polars-py": 56144.0
    },
-   "variant": {
-    "dataframes": "fused"
-   },
+   "variant": {},
    "fastest_rival": "polars-py",
-   "speedup": 3.176841140762799,
+   "speedup": 4.447401774397972,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -135,17 +129,15 @@
    "rows": 100000,
    "case": "filter_f32_50pct",
    "ns": {
-    "dataframes": 17503.0,
-    "polars": 100317.0,
-    "arrow-rs": 71694.0,
-    "pandas": 724492.0,
-    "polars-py": 56636.0
+    "dataframes": 12729.0,
+    "polars": 100017.0,
+    "arrow-rs": 71564.0,
+    "pandas": 722018.0,
+    "polars-py": 56576.0
    },
-   "variant": {
-    "dataframes": "fused"
-   },
+   "variant": {},
    "fastest_rival": "polars-py",
-   "speedup": 3.2357881506027537,
+   "speedup": 4.4446539398224525,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -153,31 +145,31 @@
    "rows": 100000,
    "case": "frame_filter_10pct",
    "ns": {
-    "dataframes": 88315.0,
-    "polars": 134650.0,
-    "arrow-rs": 75942.0,
-    "pandas": 422073.0,
-    "polars-py": 185947.0
+    "dataframes": 43040.0,
+    "polars": 129121.0,
+    "arrow-rs": 75962.0,
+    "pandas": 420866.0,
+    "polars-py": 195024.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 0.8598992243673215,
+   "speedup": 1.7649163568773234,
    "checks_agree": true,
-   "verdict": "loss"
+   "verdict": "win"
   },
   {
    "rows": 100000,
    "case": "frame_filter_50pct",
    "ns": {
-    "dataframes": 98544.0,
-    "polars": 241028.0,
-    "arrow-rs": 188049.0,
-    "pandas": 1864430.0,
-    "polars-py": 316391.0
+    "dataframes": 76593.0,
+    "polars": 244657.0,
+    "arrow-rs": 188031.0,
+    "pandas": 1832862.0,
+    "polars-py": 316761.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 1.908274476376035,
+   "speedup": 2.4549371352473464,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -185,15 +177,15 @@
    "rows": 100000,
    "case": "frame_filter_str_50pct",
    "ns": {
-    "dataframes": 141454.0,
-    "polars": 173053.0,
-    "arrow-rs": 165018.0,
-    "pandas": 2055255.0,
-    "polars-py": 234947.0
+    "dataframes": 75430.0,
+    "polars": 177462.0,
+    "arrow-rs": 165118.0,
+    "pandas": 2009953.0,
+    "polars-py": 236362.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 1.1665841899133287,
+   "speedup": 2.1890229351716823,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -201,11 +193,11 @@
    "rows": 100000,
    "case": "frame_filter_expr_50pct",
    "ns": {
-    "dataframes": 120022.0,
-    "polars": 242513.0,
-    "arrow-rs": 188029.0,
-    "pandas": 1853911.0,
-    "polars-py": 358128.0
+    "dataframes": 78617.0,
+    "polars": 239587.0,
+    "arrow-rs": 187920.0,
+    "pandas": 1827402.0,
+    "polars-py": 358320.0
    },
    "variant": {
     "polars": "lazy",
@@ -213,7 +205,7 @@
     "polars-py": "eager"
    },
    "fastest_rival": "arrow-rs",
-   "speedup": 1.5666211194614321,
+   "speedup": 2.3903227037409214,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -221,11 +213,11 @@
    "rows": 100000,
    "case": "frame_filter_and_25pct",
    "ns": {
-    "dataframes": 128389.0,
-    "polars": 248191.0,
-    "arrow-rs": 124963.0,
-    "pandas": 673327.0,
-    "polars-py": 362416.0
+    "dataframes": 60673.0,
+    "polars": 250898.0,
+    "arrow-rs": 125013.0,
+    "pandas": 674760.0,
+    "polars-py": 362247.0
    },
    "variant": {
     "polars": "lazy",
@@ -233,26 +225,26 @@
     "polars-py": "stream"
    },
    "fastest_rival": "arrow-rs",
-   "speedup": 0.9733154709515612,
+   "speedup": 2.0604387454056994,
    "checks_agree": true,
-   "verdict": "level"
+   "verdict": "win"
   },
   {
    "rows": 100000,
    "case": "filter_then_sum",
    "ns": {
-    "dataframes": 47218.0,
-    "polars": 228204.0,
-    "arrow-rs": 66534.0,
-    "pandas": 450611.0,
-    "polars-py": 282277.0
+    "dataframes": 32661.0,
+    "polars": 239548.0,
+    "arrow-rs": 66484.0,
+    "pandas": 450091.0,
+    "polars-py": 273541.0
    },
    "variant": {
     "polars": "lazy",
     "polars-py": "lazy"
    },
    "fastest_rival": "arrow-rs",
-   "speedup": 1.409081282561735,
+   "speedup": 2.0355776001959525,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -260,15 +252,15 @@
    "rows": 100000,
    "case": "slice_frame",
    "ns": {
-    "dataframes": 3.895,
-    "polars": 620.806,
-    "arrow-rs": 215.722,
-    "pandas": 13009.0,
-    "polars-py": 1490.4615384615386
+    "dataframes": 4.523,
+    "polars": 649.483,
+    "arrow-rs": 219.092,
+    "pandas": 13099.5,
+    "polars-py": 1425.7692307692307
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 55.384338896020544,
+   "speedup": 48.43953128454566,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -276,15 +268,15 @@
    "rows": 100000,
    "case": "head_frame",
    "ns": {
-    "dataframes": 3.764,
-    "polars": 602.467,
-    "arrow-rs": 205.182,
-    "pandas": 39674.0,
-    "polars-py": 1377.1538461538462
+    "dataframes": 3.798,
+    "polars": 632.296,
+    "arrow-rs": 212.775,
+    "pandas": 39384.0,
+    "polars-py": 1371.857142857143
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 54.51168969181722,
+   "speedup": 56.022906793048975,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -292,15 +284,15 @@
    "rows": 100000,
    "case": "slice_series",
    "ns": {
-    "dataframes": 19.203,
-    "polars": 74.506,
-    "arrow-rs": 20.447,
-    "pandas": 9102.0,
-    "polars-py": 918.0
+    "dataframes": 14.579,
+    "polars": 75.057,
+    "arrow-rs": 19.235,
+    "pandas": 9067.0,
+    "polars-py": 904.3157894736842
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 1.0647815445503306,
+   "speedup": 1.3193634680019204,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -308,31 +300,29 @@
    "rows": 100000,
    "case": "get_random_1k",
    "ns": {
-    "dataframes": 848.5,
-    "polars": 3401.333,
-    "arrow-rs": 759.5,
-    "pandas": 91580.0,
-    "polars-py": 232782.0
+    "dataframes": 633.5,
+    "polars": 3402.4,
+    "arrow-rs": 760.64,
+    "pandas": 92463.0,
+    "polars-py": 234859.0
    },
-   "variant": {
-    "dataframes": "value"
-   },
+   "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 0.8951090159104301,
+   "speedup": 1.2006945540647198,
    "checks_agree": true,
-   "verdict": "loss"
+   "verdict": "win"
   },
   {
    "rows": 100000,
    "case": "cell_random_1k",
    "ns": {
-    "dataframes": 13260.0,
-    "polars": 23193.0,
-    "arrow-rs": 23193.0
+    "dataframes": 13259.5,
+    "polars": 23194.0,
+    "arrow-rs": 23154.0
    },
    "variant": {},
-   "fastest_rival": "polars",
-   "speedup": 1.7490950226244344,
+   "fastest_rival": "arrow-rs",
+   "speedup": 1.7462196915419133,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -340,31 +330,31 @@
    "rows": 100000,
    "case": "sum_i64",
    "ns": {
-    "dataframes": 9427.5,
-    "polars": 9411.0,
-    "arrow-rs": 9391.0,
-    "pandas": 22973.0,
-    "polars-py": 10544.5
+    "dataframes": 4420.75,
+    "polars": 9427.667,
+    "arrow-rs": 9394.333,
+    "pandas": 22672.0,
+    "polars-py": 10670.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 0.996128347918324,
+   "speedup": 2.125054119776056,
    "checks_agree": true,
-   "verdict": "level"
+   "verdict": "win"
   },
   {
    "rows": 100000,
    "case": "sum_f64",
    "ns": {
-    "dataframes": 9678.0,
-    "polars": 11511.5,
+    "dataframes": 4505.0,
+    "polars": 10885.5,
     "arrow-rs": 11657.0,
-    "pandas": 52357.0,
-    "polars-py": 11246.0
+    "pandas": 52278.0,
+    "polars-py": 11065.5
    },
    "variant": {},
-   "fastest_rival": "polars-py",
-   "speedup": 1.1620169456499276,
+   "fastest_rival": "polars",
+   "speedup": 2.416315205327414,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -372,15 +362,15 @@
    "rows": 100000,
    "case": "mean_f64",
    "ns": {
-    "dataframes": 9698.0,
-    "polars": 11521.5,
-    "arrow-rs": 11657.0,
-    "pandas": 86852.0,
-    "polars-py": 10995.5
+    "dataframes": 4501.0,
+    "polars": 11451.5,
+    "arrow-rs": 11652.0,
+    "pandas": 85479.0,
+    "polars-py": 10820.0
    },
    "variant": {},
    "fastest_rival": "polars-py",
-   "speedup": 1.1337904722623222,
+   "speedup": 2.403910242168407,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -388,15 +378,15 @@
    "rows": 100000,
    "case": "min_max_f64",
    "ns": {
-    "dataframes": 19061.0,
-    "polars": 21099.0,
-    "arrow-rs": 58368.0,
-    "pandas": 152442.0,
-    "polars-py": 23875.0
+    "dataframes": 8886.5,
+    "polars": 21129.0,
+    "arrow-rs": 58378.0,
+    "pandas": 151182.0,
+    "polars-py": 23735.0
    },
    "variant": {},
    "fastest_rival": "polars",
-   "speedup": 1.1069198887781333,
+   "speedup": 2.377651493838969,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -404,47 +394,47 @@
    "rows": 100000,
    "case": "min_max_i64",
    "ns": {
-    "dataframes": 18980.5,
-    "polars": 19697.0,
-    "arrow-rs": 18890.0,
-    "pandas": 48630.0,
-    "polars-py": 32741.0
+    "dataframes": 9147.0,
+    "polars": 19687.0,
+    "arrow-rs": 18935.5,
+    "pandas": 48300.0,
+    "polars-py": 32731.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 0.9952319485788046,
+   "speedup": 2.070132283808899,
    "checks_agree": true,
-   "verdict": "level"
+   "verdict": "win"
   },
   {
    "rows": 100000,
    "case": "mutate_f64_inplace",
    "ns": {
-    "dataframes": 10374.5,
-    "polars": 10409.0,
-    "arrow-rs": 10770.0,
-    "pandas": 28082.0,
-    "polars-py": 61714.0
+    "dataframes": 5944.333,
+    "polars": 10424.5,
+    "arrow-rs": 10795.0,
+    "pandas": 33303.0,
+    "polars-py": 62096.0
    },
    "variant": {},
    "fastest_rival": "polars",
-   "speedup": 1.0033254614680225,
+   "speedup": 1.753687083142886,
    "checks_agree": true,
-   "verdict": "level"
+   "verdict": "win"
   },
   {
    "rows": 1000000,
    "case": "mask_i64",
    "ns": {
-    "dataframes": 89616.0,
-    "polars": 561244.0,
-    "arrow-rs": 100917.0,
-    "pandas": 162452.0,
-    "polars-py": 119622.0
+    "dataframes": 62747.0,
+    "polars": 561198.0,
+    "arrow-rs": 100407.0,
+    "pandas": 162443.0,
+    "polars-py": 118701.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 1.1261047134440278,
+   "speedup": 1.6001880567995284,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -452,35 +442,35 @@
    "rows": 1000000,
    "case": "filter_i64_1pct",
    "ns": {
-    "dataframes": 170528.0,
-    "polars": 596721.0,
-    "arrow-rs": 148946.0,
-    "pandas": 880457.0,
-    "polars-py": 156551.0
+    "dataframes": 89157.0,
+    "polars": 595713.0,
+    "arrow-rs": 156092.0,
+    "pandas": 882137.0,
+    "polars-py": 156742.0
    },
    "variant": {
     "dataframes": "fused"
    },
    "fastest_rival": "arrow-rs",
-   "speedup": 0.873440138862826,
+   "speedup": 1.750754287380688,
    "checks_agree": true,
-   "verdict": "loss"
+   "verdict": "win"
   },
   {
    "rows": 1000000,
    "case": "filter_i64_10pct",
    "ns": {
-    "dataframes": 231370.0,
-    "polars": 722552.0,
-    "arrow-rs": 296292.0,
-    "pandas": 2912908.0,
-    "polars-py": 282777.0
+    "dataframes": 156282.0,
+    "polars": 722900.0,
+    "arrow-rs": 296053.0,
+    "pandas": 2915424.0,
+    "polars-py": 284160.0
    },
    "variant": {
     "dataframes": "fused"
    },
    "fastest_rival": "polars-py",
-   "speedup": 1.2221852444137096,
+   "speedup": 1.8182516220678004,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -488,17 +478,17 @@
    "rows": 1000000,
    "case": "filter_i64_50pct",
    "ns": {
-    "dataframes": 225129.0,
-    "polars": 901340.0,
-    "arrow-rs": 672272.0,
-    "pandas": 9805227.0,
-    "polars-py": 509319.0
+    "dataframes": 189223.0,
+    "polars": 903616.0,
+    "arrow-rs": 672276.0,
+    "pandas": 9645693.0,
+    "polars-py": 510493.0
    },
    "variant": {
     "dataframes": "fused"
    },
    "fastest_rival": "polars-py",
-   "speedup": 2.262342923390589,
+   "speedup": 2.697838000665881,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -506,17 +496,17 @@
    "rows": 1000000,
    "case": "filter_i64_90pct",
    "ns": {
-    "dataframes": 227122.0,
-    "polars": 903871.0,
-    "arrow-rs": 1207713.0,
-    "pandas": 5477874.0,
-    "polars-py": 511732.0
+    "dataframes": 191487.0,
+    "polars": 901192.0,
+    "arrow-rs": 1215279.0,
+    "pandas": 5424148.0,
+    "polars-py": 509241.0
    },
    "variant": {
     "dataframes": "fused"
    },
    "fastest_rival": "polars-py",
-   "speedup": 2.2531150659117127,
+   "speedup": 2.6594024659637467,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -524,17 +514,17 @@
    "rows": 1000000,
    "case": "filter_f64_50pct",
    "ns": {
-    "dataframes": 227052.0,
-    "polars": 951010.0,
-    "arrow-rs": 651200.0,
-    "pandas": 9841463.0,
-    "polars-py": 557958.0
+    "dataframes": 188933.0,
+    "polars": 951116.0,
+    "arrow-rs": 649142.0,
+    "pandas": 9698328.0,
+    "polars-py": 557050.0
    },
    "variant": {
     "dataframes": "fused"
    },
    "fastest_rival": "polars-py",
-   "speedup": 2.457401828655991,
+   "speedup": 2.948399697247172,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -542,17 +532,17 @@
    "rows": 1000000,
    "case": "filter_i32_50pct",
    "ns": {
-    "dataframes": 130212.0,
-    "polars": 916035.0,
-    "arrow-rs": 633118.0,
-    "pandas": 9760654.0,
-    "polars-py": 454026.0
+    "dataframes": 106479.0,
+    "polars": 915128.0,
+    "arrow-rs": 633222.0,
+    "pandas": 9569148.0,
+    "polars-py": 454519.0
    },
    "variant": {
     "dataframes": "fused"
    },
    "fastest_rival": "polars-py",
-   "speedup": 3.4868214911068103,
+   "speedup": 4.268625738408512,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -560,17 +550,17 @@
    "rows": 1000000,
    "case": "filter_f32_50pct",
    "ns": {
-    "dataframes": 134149.0,
-    "polars": 1008384.0,
-    "arrow-rs": 720431.0,
-    "pandas": 9625673.0,
-    "polars-py": 463461.0
+    "dataframes": 106239.0,
+    "polars": 1005988.0,
+    "arrow-rs": 719844.0,
+    "pandas": 9538030.0,
+    "polars-py": 464006.0
    },
    "variant": {
     "dataframes": "fused"
    },
    "fastest_rival": "polars-py",
-   "speedup": 3.4548226226062067,
+   "speedup": 4.367567465808225,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -578,15 +568,15 @@
    "rows": 1000000,
    "case": "frame_filter_10pct",
    "ns": {
-    "dataframes": 852678.0,
-    "polars": 1305307.0,
-    "arrow-rs": 1572830.0,
-    "pandas": 2792431.0,
-    "polars-py": 1167553.0
+    "dataframes": 727188.0,
+    "polars": 1270782.0,
+    "arrow-rs": 1443445.0,
+    "pandas": 2643336.0,
+    "polars-py": 1108330.0
    },
    "variant": {},
    "fastest_rival": "polars-py",
-   "speedup": 1.3692777343850786,
+   "speedup": 1.5241313112977661,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -594,15 +584,15 @@
    "rows": 1000000,
    "case": "frame_filter_50pct",
    "ns": {
-    "dataframes": 1226294.0,
-    "polars": 1945686.0,
-    "arrow-rs": 2893943.0,
-    "pandas": 13503376.0,
-    "polars-py": 1849250.0
+    "dataframes": 1221100.0,
+    "polars": 1987431.0,
+    "arrow-rs": 2758170.0,
+    "pandas": 12592003.0,
+    "polars-py": 1807505.0
    },
    "variant": {},
    "fastest_rival": "polars-py",
-   "speedup": 1.50799889749114,
+   "speedup": 1.480226844648268,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -610,15 +600,15 @@
    "rows": 1000000,
    "case": "frame_filter_str_50pct",
    "ns": {
-    "dataframes": 1420396.0,
-    "polars": 1811780.0,
-    "arrow-rs": 2713306.0,
-    "pandas": 14483700.0,
-    "polars-py": 1729842.0
+    "dataframes": 1250084.0,
+    "polars": 1692310.0,
+    "arrow-rs": 2562185.0,
+    "pandas": 14276965.0,
+    "polars-py": 1602471.0
    },
    "variant": {},
    "fastest_rival": "polars-py",
-   "speedup": 1.2178589632750303,
+   "speedup": 1.2818906569478532,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -626,19 +616,19 @@
    "rows": 1000000,
    "case": "frame_filter_expr_50pct",
    "ns": {
-    "dataframes": 1342797.0,
-    "polars": 1540820.0,
-    "arrow-rs": 2908019.0,
-    "pandas": 12521432.0,
-    "polars-py": 1717319.0
+    "dataframes": 1192547.0,
+    "polars": 1553530.0,
+    "arrow-rs": 2792625.0,
+    "pandas": 12407607.0,
+    "polars-py": 1662434.0
    },
    "variant": {
     "polars": "lazy",
     "pandas": "mask",
-    "polars-py": "lazy"
+    "polars-py": "stream"
    },
    "fastest_rival": "polars",
-   "speedup": 1.1474705409678454,
+   "speedup": 1.3026991808289317,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -646,11 +636,11 @@
    "rows": 1000000,
    "case": "frame_filter_and_25pct",
    "ns": {
-    "dataframes": 1299988.0,
-    "polars": 1637406.0,
-    "arrow-rs": 2435871.0,
-    "pandas": 4285123.0,
-    "polars-py": 1542366.0
+    "dataframes": 1127556.0,
+    "polars": 1573869.0,
+    "arrow-rs": 2272323.0,
+    "pandas": 4121626.0,
+    "polars-py": 1494220.0
    },
    "variant": {
     "polars": "lazy",
@@ -658,7 +648,7 @@
     "polars-py": "stream"
    },
    "fastest_rival": "polars-py",
-   "speedup": 1.186446336427721,
+   "speedup": 1.3251847358357367,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -666,18 +656,18 @@
    "rows": 1000000,
    "case": "filter_then_sum",
    "ns": {
-    "dataframes": 240257.0,
-    "polars": 907310.0,
-    "arrow-rs": 678351.0,
-    "pandas": 6265171.0,
-    "polars-py": 628559.0
+    "dataframes": 239578.0,
+    "polars": 901523.0,
+    "arrow-rs": 667897.0,
+    "pandas": 6032534.0,
+    "polars-py": 633711.0
    },
    "variant": {
     "polars": "stream",
     "polars-py": "stream"
    },
    "fastest_rival": "polars-py",
-   "speedup": 2.6161943252433852,
+   "speedup": 2.6451134912220655,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -685,15 +675,15 @@
    "rows": 1000000,
    "case": "slice_frame",
    "ns": {
-    "dataframes": 3.892,
-    "polars": 613.097,
-    "arrow-rs": 214.775,
-    "pandas": 12984.5,
-    "polars-py": 1420.3076923076924
+    "dataframes": 4.561,
+    "polars": 654.31,
+    "arrow-rs": 215.025,
+    "pandas": 13039.5,
+    "polars-py": 1456.6153846153845
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 55.18371017471737,
+   "speedup": 47.144266608199956,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -701,15 +691,15 @@
    "rows": 1000000,
    "case": "head_frame",
    "ns": {
-    "dataframes": 3.784,
-    "polars": 596.767,
-    "arrow-rs": 212.525,
-    "pandas": 39113.0,
-    "polars-py": 1342.5
+    "dataframes": 3.8,
+    "polars": 634.655,
+    "arrow-rs": 206.154,
+    "pandas": 38912.0,
+    "polars-py": 1376.3846153846155
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 56.16411205073996,
+   "speedup": 54.25105263157895,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -717,472 +707,470 @@
    "rows": 1000000,
    "case": "slice_series",
    "ns": {
-    "dataframes": 18.894,
-    "polars": 75.686,
-    "arrow-rs": 19.259,
-    "pandas": 9150.333333333334,
-    "polars-py": 920.6842105263158
+    "dataframes": 14.576,
+    "polars": 74.368,
+    "arrow-rs": 19.23,
+    "pandas": 9173.666666666666,
+    "polars-py": 904.7
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 1.0193183021064889,
+   "speedup": 1.3192919868276618,
    "checks_agree": true,
-   "verdict": "level"
+   "verdict": "win"
   },
   {
    "rows": 1000000,
    "case": "get_random_1k",
    "ns": {
-    "dataframes": 852.769,
-    "polars": 3404.667,
-    "arrow-rs": 775.84,
-    "pandas": 92071.0,
-    "polars-py": 231891.0
+    "dataframes": 650.2,
+    "polars": 3394.833,
+    "arrow-rs": 775.44,
+    "pandas": 92072.0,
+    "polars-py": 231882.0
    },
    "variant": {
     "dataframes": "value"
    },
    "fastest_rival": "arrow-rs",
-   "speedup": 0.9097891691653894,
-   "checks_agree": true,
-   "verdict": "loss"
-  },
-  {
-   "rows": 1000000,
-   "case": "cell_random_1k",
-   "ns": {
-    "dataframes": 13264.5,
-    "polars": 23214.0,
-    "arrow-rs": 23163.0
-   },
-   "variant": {},
-   "fastest_rival": "arrow-rs",
-   "speedup": 1.7462399638131856,
+   "speedup": 1.1926176561058135,
    "checks_agree": true,
    "verdict": "win"
   },
   {
    "rows": 1000000,
-   "case": "sum_i64",
-   "ns": {
-    "dataframes": 114053.0,
-    "polars": 96580.0,
-    "arrow-rs": 96870.0,
-    "pandas": 113792.0,
-    "polars-py": 99435.0
-   },
-   "variant": {},
-   "fastest_rival": "polars",
-   "speedup": 0.8467992950645752,
-   "checks_agree": true,
-   "verdict": "loss"
-  },
-  {
-   "rows": 1000000,
-   "case": "sum_f64",
-   "ns": {
-    "dataframes": 114422.0,
-    "polars": 115515.0,
-    "arrow-rs": 116417.0,
-    "pandas": 361723.0,
-    "polars-py": 105617.0
-   },
-   "variant": {},
-   "fastest_rival": "polars-py",
-   "speedup": 0.9230480152418241,
-   "checks_agree": true,
-   "verdict": "loss"
-  },
-  {
-   "rows": 1000000,
-   "case": "mean_f64",
-   "ns": {
-    "dataframes": 114403.0,
-    "polars": 115264.0,
-    "arrow-rs": 116456.0,
-    "pandas": 703111.0,
-    "polars-py": 107640.0
-   },
-   "variant": {},
-   "fastest_rival": "polars-py",
-   "speedup": 0.9408844173666775,
-   "checks_agree": true,
-   "verdict": "loss"
-  },
-  {
-   "rows": 1000000,
-   "case": "min_max_f64",
-   "ns": {
-    "dataframes": 229597.0,
-    "polars": 210241.0,
-    "arrow-rs": 591261.0,
-    "pandas": 1194384.0,
-    "polars-py": 232223.0
-   },
-   "variant": {},
-   "fastest_rival": "polars",
-   "speedup": 0.915695762575295,
-   "checks_agree": true,
-   "verdict": "loss"
-  },
-  {
-   "rows": 1000000,
-   "case": "min_max_i64",
-   "ns": {
-    "dataframes": 136484.0,
-    "polars": 197107.0,
-    "arrow-rs": 194692.0,
-    "pandas": 228396.0,
-    "polars-py": 314676.0
-   },
-   "variant": {},
-   "fastest_rival": "arrow-rs",
-   "speedup": 1.4264822250227134,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 1000000,
-   "case": "mutate_f64_inplace",
-   "ns": {
-    "dataframes": 84627.0,
-    "polars": 103943.0,
-    "arrow-rs": 104184.0,
-    "pandas": 287845.0,
-    "polars-py": 527471.0
-   },
-   "variant": {},
-   "fastest_rival": "polars",
-   "speedup": 1.2282486676828908,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "mask_i64",
-   "ns": {
-    "dataframes": 1701462.0,
-    "polars": 5766081.0,
-    "arrow-rs": 2959079.0,
-    "pandas": 3180863.0,
-    "polars-py": 2930458.0
-   },
-   "variant": {},
-   "fastest_rival": "polars-py",
-   "speedup": 1.7223176303672958,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "filter_i64_1pct",
-   "ns": {
-    "dataframes": 2573521.0,
-    "polars": 7314072.0,
-    "arrow-rs": 4290282.0,
-    "pandas": 12178093.0,
-    "polars-py": 4395147.0
-   },
-   "variant": {
-    "dataframes": "fused"
-   },
-   "fastest_rival": "arrow-rs",
-   "speedup": 1.6670864547054405,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "filter_i64_10pct",
-   "ns": {
-    "dataframes": 2918652.0,
-    "polars": 8745846.0,
-    "arrow-rs": 6197902.0,
-    "pandas": 35151134.0,
-    "polars-py": 5929645.0
-   },
-   "variant": {
-    "dataframes": "fused"
-   },
-   "fastest_rival": "polars-py",
-   "speedup": 2.0316382357334826,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "filter_i64_50pct",
-   "ns": {
-    "dataframes": 5074993.0,
-    "polars": 10224532.0,
-    "arrow-rs": 8877642.0,
-    "pandas": 71123783.0,
-    "polars-py": 7485426.0
-   },
-   "variant": {
-    "dataframes": "fused"
-   },
-   "fastest_rival": "polars-py",
-   "speedup": 1.4749628226088194,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "filter_i64_90pct",
-   "ns": {
-    "dataframes": 5307093.0,
-    "polars": 10646310.0,
-    "arrow-rs": 14090649.0,
-    "pandas": 49204960.0,
-    "polars-py": 8388069.0
-   },
-   "variant": {
-    "dataframes": "fused"
-   },
-   "fastest_rival": "polars-py",
-   "speedup": 1.580539289588481,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "filter_f64_50pct",
-   "ns": {
-    "dataframes": 5240341.0,
-    "polars": 10779519.0,
-    "arrow-rs": 9022735.0,
-    "pandas": 70943174.0,
-    "polars-py": 8176446.0
-   },
-   "variant": {
-    "dataframes": "fused"
-   },
-   "fastest_rival": "polars-py",
-   "speedup": 1.5602889201294343,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "filter_i32_50pct",
-   "ns": {
-    "dataframes": 1511499.0,
-    "polars": 9333438.0,
-    "arrow-rs": 7018891.0,
-    "pandas": 71134766.0,
-    "polars-py": 5281316.0
-   },
-   "variant": {
-    "dataframes": "fused"
-   },
-   "fastest_rival": "polars-py",
-   "speedup": 3.4940916269213544,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "filter_f32_50pct",
-   "ns": {
-    "dataframes": 1560468.0,
-    "polars": 10255899.0,
-    "arrow-rs": 7491560.0,
-    "pandas": 69481074.0,
-    "polars-py": 5533797.0
-   },
-   "variant": {
-    "dataframes": "fused"
-   },
-   "fastest_rival": "polars-py",
-   "speedup": 3.546241896661771,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "frame_filter_10pct",
-   "ns": {
-    "dataframes": 14096937.0,
-    "polars": 17240397.0,
-    "arrow-rs": 19686450.0,
-    "pandas": 41880811.0,
-    "polars-py": 14986305.0
-   },
-   "variant": {},
-   "fastest_rival": "polars-py",
-   "speedup": 1.063089449857086,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "frame_filter_50pct",
-   "ns": {
-    "dataframes": 17325445.0,
-    "polars": 21833096.0,
-    "arrow-rs": 32292441.0,
-    "pandas": 80602485.0,
-    "polars-py": 20293678.0
-   },
-   "variant": {},
-   "fastest_rival": "polars-py",
-   "speedup": 1.1713221796034676,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "frame_filter_str_50pct",
-   "ns": {
-    "dataframes": 17414482.0,
-    "polars": 22932654.0,
-    "arrow-rs": 30361072.0,
-    "pandas": 119996287.0,
-    "polars-py": 21584545.0
-   },
-   "variant": {},
-   "fastest_rival": "polars-py",
-   "speedup": 1.2394594912441266,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "frame_filter_expr_50pct",
-   "ns": {
-    "dataframes": 19900363.0,
-    "polars": 17640856.0,
-    "arrow-rs": 32732175.0,
-    "pandas": 81865284.0,
-    "polars-py": 18261936.0
-   },
-   "variant": {
-    "polars": "stream",
-    "pandas": "mask",
-    "polars-py": "stream"
-   },
-   "fastest_rival": "polars",
-   "speedup": 0.8864590057980349,
-   "checks_agree": true,
-   "verdict": "loss"
-  },
-  {
-   "rows": 10000000,
-   "case": "frame_filter_and_25pct",
-   "ns": {
-    "dataframes": 20660852.0,
-    "polars": 16508965.0,
-    "arrow-rs": 27785121.0,
-    "pandas": 59200075.0,
-    "polars-py": 16132773.0
-   },
-   "variant": {
-    "polars": "stream",
-    "pandas": "mask",
-    "polars-py": "stream"
-   },
-   "fastest_rival": "polars-py",
-   "speedup": 0.7808377408637359,
-   "checks_agree": true,
-   "verdict": "loss"
-  },
-  {
-   "rows": 10000000,
-   "case": "filter_then_sum",
-   "ns": {
-    "dataframes": 3980185.0,
-    "polars": 7117903.0,
-    "arrow-rs": 9641509.0,
-    "pandas": 41808288.0,
-    "polars-py": 4562210.0
-   },
-   "variant": {
-    "polars": "stream",
-    "polars-py": "stream"
-   },
-   "fastest_rival": "polars-py",
-   "speedup": 1.1462306400330637,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "slice_frame",
-   "ns": {
-    "dataframes": 3.888,
-    "polars": 612.452,
-    "arrow-rs": 213.553,
-    "pandas": 13009.0,
-    "polars-py": 1415.6923076923076
-   },
-   "variant": {},
-   "fastest_rival": "arrow-rs",
-   "speedup": 54.92618312757202,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "head_frame",
-   "ns": {
-    "dataframes": 3.764,
-    "polars": 595.323,
-    "arrow-rs": 205.0,
-    "pandas": 39383.0,
-    "polars-py": 1309.642857142857
-   },
-   "variant": {},
-   "fastest_rival": "arrow-rs",
-   "speedup": 54.46333687566419,
-   "checks_agree": true,
-   "verdict": "win"
-  },
-  {
-   "rows": 10000000,
-   "case": "slice_series",
-   "ns": {
-    "dataframes": 19.186,
-    "polars": 74.203,
-    "arrow-rs": 19.233,
-    "pandas": 9040.333333333334,
-    "polars-py": 914.8421052631579
-   },
-   "variant": {},
-   "fastest_rival": "arrow-rs",
-   "speedup": 1.0024497029083708,
-   "checks_agree": true,
-   "verdict": "level"
-  },
-  {
-   "rows": 10000000,
-   "case": "get_random_1k",
-   "ns": {
-    "dataframes": 854.0,
-    "polars": 3398.0,
-    "arrow-rs": 773.84,
-    "pandas": 91380.0,
-    "polars-py": 233606.0
-   },
-   "variant": {
-    "dataframes": "value"
-   },
-   "fastest_rival": "arrow-rs",
-   "speedup": 0.906135831381733,
-   "checks_agree": true,
-   "verdict": "loss"
-  },
-  {
-   "rows": 10000000,
    "case": "cell_random_1k",
    "ns": {
     "dataframes": 13260.0,
     "polars": 23223.0,
-    "arrow-rs": 23765.0
+    "arrow-rs": 23163.0
+   },
+   "variant": {},
+   "fastest_rival": "arrow-rs",
+   "speedup": 1.7468325791855204,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 1000000,
+   "case": "sum_i64",
+   "ns": {
+    "dataframes": 53480.0,
+    "polars": 96671.0,
+    "arrow-rs": 96621.0,
+    "pandas": 113652.0,
+    "polars-py": 99105.0
+   },
+   "variant": {},
+   "fastest_rival": "arrow-rs",
+   "speedup": 1.806675392670157,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 1000000,
+   "case": "sum_f64",
+   "ns": {
+    "dataframes": 54231.0,
+    "polars": 114694.0,
+    "arrow-rs": 116367.0,
+    "pandas": 359592.0,
+    "polars-py": 105638.0
+   },
+   "variant": {},
+   "fastest_rival": "polars-py",
+   "speedup": 1.947926462724272,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 1000000,
+   "case": "mean_f64",
+   "ns": {
+    "dataframes": 54401.0,
+    "polars": 114965.0,
+    "arrow-rs": 116377.0,
+    "pandas": 702822.0,
+    "polars-py": 107341.0
+   },
+   "variant": {},
+   "fastest_rival": "polars-py",
+   "speedup": 1.9731438760316906,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 1000000,
+   "case": "min_max_f64",
+   "ns": {
+    "dataframes": 108052.0,
+    "polars": 211445.0,
+    "arrow-rs": 591544.0,
+    "pandas": 1180224.0,
+    "polars-py": 226213.0
    },
    "variant": {},
    "fastest_rival": "polars",
-   "speedup": 1.7513574660633484,
+   "speedup": 1.9568818716914078,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 1000000,
+   "case": "min_max_i64",
+   "ns": {
+    "dataframes": 107310.0,
+    "polars": 196627.0,
+    "arrow-rs": 194193.0,
+    "pandas": 225070.0,
+    "polars-py": 314377.0
+   },
+   "variant": {},
+   "fastest_rival": "arrow-rs",
+   "speedup": 1.8096449538719597,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 1000000,
+   "case": "mutate_f64_inplace",
+   "ns": {
+    "dataframes": 53209.0,
+    "polars": 104445.0,
+    "arrow-rs": 104435.0,
+    "pandas": 286705.0,
+    "polars-py": 510743.0
+   },
+   "variant": {},
+   "fastest_rival": "arrow-rs",
+   "speedup": 1.9627318686688342,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "mask_i64",
+   "ns": {
+    "dataframes": 1476808.0,
+    "polars": 5785243.0,
+    "arrow-rs": 2951391.0,
+    "pandas": 3157358.0,
+    "polars-py": 2770043.0
+   },
+   "variant": {},
+   "fastest_rival": "polars-py",
+   "speedup": 1.875696095904139,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "filter_i64_1pct",
+   "ns": {
+    "dataframes": 1671171.0,
+    "polars": 7175347.0,
+    "arrow-rs": 4120507.0,
+    "pandas": 11661728.0,
+    "polars-py": 4213708.0
+   },
+   "variant": {
+    "dataframes": "fused"
+   },
+   "fastest_rival": "arrow-rs",
+   "speedup": 2.465640559823022,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "filter_i64_10pct",
+   "ns": {
+    "dataframes": 2376006.0,
+    "polars": 8644732.0,
+    "arrow-rs": 5909576.0,
+    "pandas": 35309602.0,
+    "polars-py": 5784461.0
+   },
+   "variant": {
+    "dataframes": "fused"
+   },
+   "fastest_rival": "polars-py",
+   "speedup": 2.4345313101061192,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "filter_i64_50pct",
+   "ns": {
+    "dataframes": 3475640.0,
+    "polars": 10020721.0,
+    "arrow-rs": 8800863.0,
+    "pandas": 70612590.0,
+    "polars-py": 7489976.0
+   },
+   "variant": {
+    "dataframes": "fused"
+   },
+   "fastest_rival": "polars-py",
+   "speedup": 2.154991886386392,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "filter_i64_90pct",
+   "ns": {
+    "dataframes": 4589441.0,
+    "polars": 10440805.0,
+    "arrow-rs": 14197821.0,
+    "pandas": 48121381.0,
+    "polars-py": 7863984.0
+   },
+   "variant": {
+    "dataframes": "fused"
+   },
+   "fastest_rival": "polars-py",
+   "speedup": 1.7134949550500813,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "filter_f64_50pct",
+   "ns": {
+    "dataframes": 3526565.0,
+    "polars": 10607857.0,
+    "arrow-rs": 8894457.0,
+    "pandas": 70373953.0,
+    "polars-py": 8037237.0
+   },
+   "variant": {
+    "dataframes": "fused"
+   },
+   "fastest_rival": "polars-py",
+   "speedup": 2.279055398099851,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "filter_i32_50pct",
+   "ns": {
+    "dataframes": 1473912.0,
+    "polars": 9330921.0,
+    "arrow-rs": 6966316.0,
+    "pandas": 70358550.0,
+    "polars-py": 5283806.0
+   },
+   "variant": {
+    "dataframes": "fused"
+   },
+   "fastest_rival": "polars-py",
+   "speedup": 3.58488566481581,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "filter_f32_50pct",
+   "ns": {
+    "dataframes": 1528012.0,
+    "polars": 10247746.0,
+    "arrow-rs": 7452742.0,
+    "pandas": 69064944.0,
+    "polars-py": 5474472.0
+   },
+   "variant": {
+    "dataframes": "fused"
+   },
+   "fastest_rival": "polars-py",
+   "speedup": 3.5827414967945277,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "frame_filter_10pct",
+   "ns": {
+    "dataframes": 11647929.0,
+    "polars": 16147240.0,
+    "arrow-rs": 18884942.0,
+    "pandas": 40212724.0,
+    "polars-py": 13613866.0
+   },
+   "variant": {},
+   "fastest_rival": "polars-py",
+   "speedup": 1.1687799607981815,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "frame_filter_50pct",
+   "ns": {
+    "dataframes": 15675359.0,
+    "polars": 21617488.0,
+    "arrow-rs": 31125998.0,
+    "pandas": 79776943.0,
+    "polars-py": 18912166.0
+   },
+   "variant": {},
+   "fastest_rival": "polars-py",
+   "speedup": 1.206490135249853,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "frame_filter_str_50pct",
+   "ns": {
+    "dataframes": 15909765.0,
+    "polars": 21569247.0,
+    "arrow-rs": 29278738.0,
+    "pandas": 118836785.0,
+    "polars-py": 19837733.0
+   },
+   "variant": {},
+   "fastest_rival": "polars-py",
+   "speedup": 1.246890384615989,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "frame_filter_expr_50pct",
+   "ns": {
+    "dataframes": 15205352.0,
+    "polars": 16548792.0,
+    "arrow-rs": 31020644.0,
+    "pandas": 80115551.0,
+    "polars-py": 17182374.0
+   },
+   "variant": {
+    "polars": "stream",
+    "pandas": "mask",
+    "polars-py": "lazy"
+   },
+   "fastest_rival": "polars",
+   "speedup": 1.0883531009344605,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "frame_filter_and_25pct",
+   "ns": {
+    "dataframes": 13174500.0,
+    "polars": 15945100.0,
+    "arrow-rs": 26382853.0,
+    "pandas": 57940276.0,
+    "polars-py": 15210733.0
+   },
+   "variant": {
+    "polars": "stream",
+    "pandas": "mask",
+    "polars-py": "stream"
+   },
+   "fastest_rival": "polars-py",
+   "speedup": 1.1545586549774185,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "filter_then_sum",
+   "ns": {
+    "dataframes": 3938015.0,
+    "polars": 7070432.0,
+    "arrow-rs": 9466664.0,
+    "pandas": 39097754.0,
+    "polars-py": 4182200.0
+   },
+   "variant": {
+    "polars": "stream",
+    "polars-py": "stream"
+   },
+   "fastest_rival": "polars-py",
+   "speedup": 1.0620071279565975,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "slice_frame",
+   "ns": {
+    "dataframes": 4.428,
+    "polars": 636.032,
+    "arrow-rs": 206.795,
+    "pandas": 13019.0,
+    "polars-py": 1411.923076923077
+   },
+   "variant": {},
+   "fastest_rival": "arrow-rs",
+   "speedup": 46.7016711833785,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "head_frame",
+   "ns": {
+    "dataframes": 3.811,
+    "polars": 631.172,
+    "arrow-rs": 216.15,
+    "pandas": 40085.0,
+    "polars-py": 1335.357142857143
+   },
+   "variant": {},
+   "fastest_rival": "arrow-rs",
+   "speedup": 56.71739700865915,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "slice_series",
+   "ns": {
+    "dataframes": 14.576,
+    "polars": 73.436,
+    "arrow-rs": 19.52,
+    "pandas": 9094.0,
+    "polars-py": 893.2
+   },
+   "variant": {},
+   "fastest_rival": "arrow-rs",
+   "speedup": 1.3391877058177826,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "get_random_1k",
+   "ns": {
+    "dataframes": 656.724,
+    "polars": 3409.667,
+    "arrow-rs": 777.44,
+    "pandas": 92032.0,
+    "polars-py": 233076.0
+   },
+   "variant": {},
+   "fastest_rival": "arrow-rs",
+   "speedup": 1.1838154232219318,
+   "checks_agree": true,
+   "verdict": "win"
+  },
+  {
+   "rows": 10000000,
+   "case": "cell_random_1k",
+   "ns": {
+    "dataframes": 13260.0,
+    "polars": 24686.0,
+    "arrow-rs": 23774.0
+   },
+   "variant": {},
+   "fastest_rival": "arrow-rs",
+   "speedup": 1.7929110105580695,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -1190,15 +1178,15 @@
    "rows": 10000000,
    "case": "sum_i64",
    "ns": {
-    "dataframes": 1497525.0,
-    "polars": 2440685.0,
-    "arrow-rs": 2417752.0,
-    "pandas": 3048259.0,
-    "polars-py": 2531749.0
+    "dataframes": 1312441.0,
+    "polars": 2293154.0,
+    "arrow-rs": 2294927.0,
+    "pandas": 2932316.0,
+    "polars-py": 2421131.0
    },
    "variant": {},
-   "fastest_rival": "arrow-rs",
-   "speedup": 1.6144985893390762,
+   "fastest_rival": "polars",
+   "speedup": 1.7472434951361624,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -1206,15 +1194,15 @@
    "rows": 10000000,
    "case": "sum_f64",
    "ns": {
-    "dataframes": 1484207.0,
-    "polars": 3054286.0,
-    "arrow-rs": 2435612.0,
-    "pandas": 7404618.0,
-    "polars-py": 2662553.0
+    "dataframes": 1311900.0,
+    "polars": 2926518.0,
+    "arrow-rs": 2288245.0,
+    "pandas": 7156599.0,
+    "polars-py": 2473130.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 1.6410190761800747,
+   "speedup": 1.7442221205884594,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -1222,15 +1210,15 @@
    "rows": 10000000,
    "case": "mean_f64",
    "ns": {
-    "dataframes": 1500768.0,
-    "polars": 3074781.0,
-    "arrow-rs": 2432757.0,
-    "pandas": 10633551.0,
-    "polars-py": 2601701.0
+    "dataframes": 1333591.0,
+    "polars": 2907802.0,
+    "arrow-rs": 2309896.0,
+    "pandas": 10507019.0,
+    "polars-py": 2470794.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 1.6210080438815326,
+   "speedup": 1.7320872741342737,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -1238,15 +1226,15 @@
    "rows": 10000000,
    "case": "min_max_f64",
    "ns": {
-    "dataframes": 3071848.0,
-    "polars": 6306363.0,
-    "arrow-rs": 7549197.0,
-    "pandas": 20978810.0,
-    "polars-py": 6332861.0
+    "dataframes": 2691908.0,
+    "polars": 5935592.0,
+    "arrow-rs": 7194837.0,
+    "pandas": 20216295.0,
+    "polars-py": 6107256.0
    },
    "variant": {},
    "fastest_rival": "polars",
-   "speedup": 2.05295411752144,
+   "speedup": 2.2049758015504244,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -1254,15 +1242,15 @@
    "rows": 10000000,
    "case": "min_max_i64",
    "ns": {
-    "dataframes": 3240565.0,
-    "polars": 5678462.0,
-    "arrow-rs": 5581234.0,
-    "pandas": 5821303.0,
-    "polars-py": 5855767.0
+    "dataframes": 2970657.0,
+    "polars": 5501033.0,
+    "arrow-rs": 5365130.0,
+    "pandas": 5723658.0,
+    "polars-py": 5633972.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 1.7223027465889436,
+   "speedup": 1.806041559156779,
    "checks_agree": true,
    "verdict": "win"
   },
@@ -1270,15 +1258,15 @@
    "rows": 10000000,
    "case": "mutate_f64_inplace",
    "ns": {
-    "dataframes": 2403602.0,
-    "polars": 2875887.0,
-    "arrow-rs": 2853374.0,
-    "pandas": 6148202.0,
-    "polars-py": 13311247.0
+    "dataframes": 2092849.0,
+    "polars": 2766947.0,
+    "arrow-rs": 2752590.0,
+    "pandas": 5820500.0,
+    "polars-py": 12320685.0
    },
    "variant": {},
    "fastest_rival": "arrow-rs",
-   "speedup": 1.1871241578264622,
+   "speedup": 1.3152358340233816,
    "checks_agree": true,
    "verdict": "win"
   }
