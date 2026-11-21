@@ -73,7 +73,7 @@ to, as they do in Polars.)
 | module | files | what it owns | what it must not know |
 |--------|-------|--------------|-----------------------|
 | `memory` | `alloc.rs`, `buffer.rs`, `bitmap.rs` | the layout contract, lifetime of bytes, sharing, copy-on-write | columns, types, names |
-| `kernels` | `x86.rs`, `scalar.rs`, `tables.rs`, `aggregate.rs`, `arith.rs`, `pipeline.rs`, `par.rs`, `team.rs`, `cache.rs` | every hot loop; CPU-feature dispatch; cache and thread policy; the fork-join team | nulls as a concept, names, frames |
+| `kernels` | `x86.rs`, `x86_512.rs`, `scalar.rs`, `tables.rs`, `aggregate.rs`, `arith.rs`, `pipeline.rs`, `par.rs`, `team.rs`, `cache.rs` | every hot loop; CPU-feature dispatch; cache and thread policy; the fork-join team | nulls as a concept, names, frames |
 | `datatypes` | `mod.rs`, `any_value.rs`, `small_str.rs` | the logical vocabulary | storage |
 | `chunked_array` | `mod.rs`, `ops.rs`, `boolean.rs`, `string.rs` | typed columns: values + validity, and the typed operations on them | other columns |
 | `series` | `mod.rs`, `arithmetic.rs`, `comparison.rs`, `pandas.rs` | run-time typing and dispatch | frames |
@@ -273,11 +273,13 @@ A filter is two kernels joined by a bitmask.
 
 ### 4.1 Compare → bitmask
 
-- AVX2 kernels for all ten numeric types produce one mask word per 64 rows.
-- Six operators are covered by three vector predicates per type and an
-  optional complement of the finished word.
-- Unsigned integers are compared as signed after flipping the sign bit of both
-  operands.
+- Kernels for all ten numeric types produce one mask word per 64 rows.
+- **AVX-512:** a comparison writes its result to a mask register, so a word
+  is one to eight instructions with no sign-bit extraction; all six operators
+  exist for signed, unsigned and floating-point lanes.
+- **AVX2:** six operators are covered by three vector predicates per type and
+  an optional complement of the finished word; unsigned integers are compared
+  as signed after flipping the sign bit of both operands.
 - Floats use a total order — NaN equals NaN and is greater than everything —
   so that filters, sorts and group-bys agree with each other.
 - The kernels return the population count of what they wrote, so a filter
@@ -285,19 +287,24 @@ A filter is two kernels joined by a bitmask.
 
 ### 4.2 Compaction
 
-- **4- and 8-byte elements, dense words:** a table of `vpermd` index vectors,
-  one entry per mask byte (or nibble). Stores are whole vectors. The output
-  offset of every step of a 64-row word is derived from the word's population
-  counts before the first step runs, so there is no data-dependent branch and
-  no step waits for the previous one. The apron (L2) makes the last store
-  legal.
+- **Dense words, AVX-512:** `vpcompress` packs the selected lanes of a register
+  to its front — eight 64-bit, sixteen 32-bit, thirty-two 16-bit or sixty-four
+  8-bit lanes per step (the last two need VBMI2). The register is stored
+  whole: the form that writes only the selected lanes to memory is very slow
+  on some CPUs.
+- **Dense words, AVX2 (4- and 8-byte elements):** a table of `vpermd` index
+  vectors, one entry per mask byte (or nibble). Stores are whole vectors.
+- In both, the output offset of every step of a 64-row word is derived from
+  the word's population counts before the first step runs, so there is no
+  data-dependent branch and no step waits for the previous one. The apron
+  (L2) makes the last store legal.
 - **Sparse stretches:** the density of each group of 16 mask words picks a
   fixed number of scalar steps per word (4, 8 or 12): take the lowest set
   bit, copy that element, clear the bit. Steps beyond a word's population
   count copy a harmless element past the cursor, so this loop is branch-free
   too.
-- **1- and 2-byte elements:** table-driven `pshufb` steps; the cursor advances
-  by a population count.
+- **1- and 2-byte elements with AVX2:** table-driven `pshufb` steps; the cursor
+  advances by a population count.
 - **16-byte string views:** each mask bit is doubled and the pair goes through
   the 8-byte kernel.
 - **Bitmaps** (boolean values, validity) are compacted with `pext`.
@@ -373,11 +380,13 @@ buffer as 4.5.
 ### 4.8 Dispatch
 
 The crate is compiled for the baseline of its target. `kernels::level()`
-detects AVX2, BMI1/2, POPCNT, LZCNT and FMA once and caches the answer; kernel
-entry points branch on it. Loops that LLVM vectorises well by itself are
+detects the tier once — AVX-512 (F, BW, DQ, VL), else AVX2 (with BMI1/2,
+POPCNT, LZCNT, FMA), else portable code — and caches the answer; kernel entry
+points branch on it. Loops that LLVM vectorises well by itself are
 written once and re-instantiated inside a `#[target_feature]` wrapper
 (`simd_dispatch!`), so they too run with 256-bit vectors in a portable binary.
-`DATAFRAMES_SIMD=scalar` forces the portable kernels.
+`DATAFRAMES_SIMD=scalar` forces the portable kernels and `DATAFRAMES_SIMD=avx2`
+stops at AVX2.
 
 ### 4.9 Reductions and work splitting
 
@@ -567,7 +576,9 @@ check ownership once, then run a plain loop over `&mut [T]`.
   uninitialised output capacity to a kernel.
 - **Model checking of kernels.** Every vector kernel is compared with a
   portable reference for every element type, every operator, lengths around
-  every block and word boundary, and mask densities from empty to full.
+  every block and word boundary, and mask densities from empty to full. On a
+  CPU with AVX-512 the same run also calls the AVX2 kernels directly, so both
+  vector tiers are covered wherever the tests land.
 - **Both dispatch paths in CI.** The test suite runs with run-time dispatch,
   with `-C target-cpu=native`, with `DATAFRAMES_SIMD=scalar`, and on aarch64.
 - **Whole-frame filters against a row-by-row model** at densities on both

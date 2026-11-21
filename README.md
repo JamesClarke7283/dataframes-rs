@@ -123,8 +123,8 @@ fn main() {
 
 A filter is two kernels joined by a bitmask: *compare* turns 64 rows into one mask word, *compact* turns a word and 64 rows into the surviving rows.
 
-- **Compare → bitmask** for all ten numeric types with AVX2: three base predicates per type plus a complement cover the six operators; unsigned types use a sign-bit bias; floats follow a total order (NaN equals NaN and sorts last).
-- **Table-driven compaction** without data-dependent branches: `vpermd` for 4- and 8-byte elements, `pshufb` for 1- and 2-byte elements, and 16-byte string views through the 8-byte kernel with doubled mask bits. The output offsets of all steps of a mask word come from its population counts up front, so no step waits for the previous one.
+- **Compare → bitmask** for all ten numeric types, with AVX-512 where the CPU has it and AVX2 otherwise. AVX-512 compares straight into mask registers; with AVX2, three base predicates per type plus a complement cover the six operators and unsigned types use a sign-bit bias. Floats follow a total order (NaN equals NaN and sorts last).
+- **Compaction without data-dependent branches:** `vpcompress` with AVX-512; with AVX2, table-driven `vpermd` for 4- and 8-byte elements and `pshufb` for 1- and 2-byte elements. 16-byte string views go through the 8-byte kernel with doubled mask bits. The output offsets of all steps of a mask word come from its population counts up front, so no step waits for the previous one.
 - **Sparse stretches use scalar steps** — the density of each group of mask words picks a fixed number of "lowest set bit, copy, clear" steps per word, again without a data-dependent branch.
 - **Fusion** — when predicate and payload are the same column, the two kernels alternate over cache-sized blocks, so each block is compacted while it is still in L1/L2 and the column crosses the memory bus once.
 - **Parallel and still contiguous** — the ordered-commit pipeline lets every core scan a block, take its output offset in a two-atomic-operation critical section, and compact into one shared allocation. The result is exactly what a sequential filter produces.
@@ -132,7 +132,7 @@ A filter is two kernels joined by a bitmask: *compare* turns 64 rows into one ma
 - **Frames share row-index lists** — a frame is filtered block by block over all its columns; a block keeping at most two rows in five turns its mask into a list of row indices once, and every column is gathered through it.
 - **Small columns go parallel too** — the kernels run on a fork-join team whose workers keep polling for 100 µs after a parallel region, so the next region starts in about half a microsecond and columns from 64 KiB upwards use every core.
 - **Predicates on frames are compiled** — `a < 5 & b > 2.0` becomes a tree of block kernels and is fused with the compaction of every output column; `filter(...).select([sum])` adds every row under a lane mask, so the selected rows are never materialised or even compacted.
-- **Run-time dispatch** — the crate compiles for the baseline of its target and selects the AVX2 kernels at run time, once. `DATAFRAMES_SIMD=scalar` forces the portable kernels, which are also the reference the vector kernels are tested against.
+- **Run-time dispatch** — the crate compiles for the baseline of its target and selects the AVX-512 or AVX2 kernels at run time, once. `DATAFRAMES_SIMD=scalar` forces the portable kernels, which are also the reference every vector kernel is tested against.
 
 ## Smart pointers for zero-overhead slicing
 
@@ -283,7 +283,7 @@ Read once, from the environment, when first needed.
 - **Version 0.1.** The memory, kernel and concurrency layers are the point of the crate and are tested accordingly; the API surface covers the core of Polars and pandas, not all of either.
 - **In memory only.** No CSV, Parquet or IPC readers yet.
 - **Types:** no temporal, decimal, categorical or nested types yet.
-- **Vector kernels:** AVX2 on x86-64, selected at run time; other targets run the portable kernels.
+- **Vector kernels:** AVX-512 and AVX2 on x86-64, selected at run time; other targets run the portable kernels.
 - **Huge pages and block recycling** use `mmap`/`madvise` on Unix; elsewhere large blocks come from the global allocator.
 
 ## License

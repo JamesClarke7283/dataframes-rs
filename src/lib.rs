@@ -57,9 +57,10 @@
 //!   the pointer; reading through a slice is reading a `&[T]`. A frame slices
 //!   in O(1) regardless of its width.
 //! * **Filters are bitmasks and vector kernels.** Predicates become 64-bit
-//!   mask words; compaction is a table-driven AVX2 permute with optional
-//!   non-temporal stores; the two are fused block by block so data is read
-//!   from memory once, by all cores, into one contiguous result.
+//!   mask words; compaction is `vpcompress` (AVX-512) or a table-driven
+//!   permute (AVX2), with optional non-temporal stores; the two are fused
+//!   block by block so data is read from memory once, by all cores, into one
+//!   contiguous result.
 //! * **Mutation is proved, not locked.** Shared data is immutable; mutation
 //!   needs unique ownership (checked by the borrow checker and one reference
 //!   count) or goes through a snapshot-isolated [`sync::SharedFrame`]. Reading
