@@ -129,6 +129,11 @@ macro_rules! impl_num_float {
                 // LLVM keeps the select-based lanes scalar for floats, so use
                 // `vminp*`/`vmaxp*` directly where they exist.
                 #[cfg(target_arch = "x86_64")]
+                if super::level() >= super::Level::Avx512 {
+                    // SAFETY: AVX-512 was detected.
+                    return unsafe { super::x86_512::$kernel(values) };
+                }
+                #[cfg(target_arch = "x86_64")]
                 if super::level() >= super::Level::Avx2 {
                     // SAFETY: AVX2 was detected.
                     return unsafe { super::x86::$kernel(values) };
@@ -139,6 +144,11 @@ macro_rules! impl_num_float {
             #[inline]
             fn min_piece(values: &[Self]) -> Self {
                 #[cfg(target_arch = "x86_64")]
+                if super::level() >= super::Level::Avx512 {
+                    // SAFETY: AVX-512 was detected.
+                    return unsafe { super::x86_512::$min(values) };
+                }
+                #[cfg(target_arch = "x86_64")]
                 if super::level() >= super::Level::Avx2 {
                     // SAFETY: AVX2 was detected.
                     return unsafe { super::x86::$min(values) };
@@ -148,6 +158,11 @@ macro_rules! impl_num_float {
 
             #[inline]
             fn max_piece(values: &[Self]) -> Self {
+                #[cfg(target_arch = "x86_64")]
+                if super::level() >= super::Level::Avx512 {
+                    // SAFETY: AVX-512 was detected.
+                    return unsafe { super::x86_512::$max(values) };
+                }
                 #[cfg(target_arch = "x86_64")]
                 if super::level() >= super::Level::Avx2 {
                     // SAFETY: AVX2 was detected.
@@ -390,13 +405,33 @@ simd_dispatch!(fn count_nan_serial<T: Num>(values: &[T]) -> usize = count_nan_im
 simd_dispatch!(fn min_serial<T: Num>(values: &[T]) -> T = min_impl);
 simd_dispatch!(fn max_serial<T: Num>(values: &[T]) -> T = max_impl);
 
-/// Rows per reduction piece.
+/// Most rows in a reduction piece.
 ///
 /// A column longer than this is reduced piece by piece and the per-piece
-/// results are folded left to right. The piece size is a constant (not a
-/// function of the thread count), so a floating-point sum has the same value
-/// whether the pieces were computed by one core or by sixteen.
+/// results are folded left to right. Where the pieces begin depends on the
+/// length of the column alone ([`piece_rows`]), not on the thread count, so
+/// a floating-point sum has the same value whether the pieces were computed
+/// by one core or by sixteen.
 pub const PIECE_ROWS: usize = 1 << 14;
+
+/// Up to this many pieces, a column is cut into a power of two of them.
+const BALANCED_PIECES: usize = 64;
+
+/// Rows per reduction piece for a column of `n` rows (the last piece may be
+/// shorter): a multiple of 64, at most [`PIECE_ROWS`].
+///
+/// A column of up to 64 pieces is cut into a power of two of equal pieces
+/// rather than into full ones and a remainder, so that two or four threads
+/// can share it evenly — which matters exactly for the columns small enough
+/// to sit in the cache, where a thread should always get the same part.
+#[inline]
+pub fn piece_rows(n: usize) -> usize {
+    let count = n.div_ceil(PIECE_ROWS);
+    if count > BALANCED_PIECES {
+        return PIECE_ROWS;
+    }
+    (n.div_ceil(count.next_power_of_two().max(1)).div_ceil(64) * 64).max(64)
+}
 
 #[inline]
 fn reduce_pieces<T: Num, R: Send>(
@@ -405,31 +440,71 @@ fn reduce_pieces<T: Num, R: Send>(
     init: R,
     fold: impl Fn(R, R) -> R,
 ) -> R {
-    if values.len() <= PIECE_ROWS {
+    let n = values.len();
+    if n <= PIECE_ROWS {
         return fold(init, map(values));
     }
-    let tasks = par::tasks_for(values.len(), size_of::<T>());
+    let piece = piece_rows(n);
+    let plan = par::plan(n, size_of::<T>());
+    let tasks = plan.tasks();
     if tasks <= 1 {
-        return values.chunks(PIECE_ROWS).map(&map).fold(init, fold);
+        return values.chunks(piece).map(&map).fold(init, fold);
     }
-    // The threads claim contiguous runs of whole pieces - long sequential
+    // The threads take contiguous runs of whole pieces - long sequential
     // streams, which is what the hardware prefetchers and a shared memory bus
     // want - and store one result per piece. The fold below runs over the
     // pieces in order, so it does not depend on who computed what.
-    let n = values.len();
-    let pieces = n.div_ceil(PIECE_ROWS);
-    let run = (par::chunk_rows(n, size_of::<T>(), tasks) / PIECE_ROWS).max(1);
+    let pieces = n.div_ceil(piece);
+    let run = par::chunk_rows(n, size_of::<T>(), tasks).div_ceil(piece).max(1);
+    let chunks = pieces.div_ceil(run);
+    if chunks <= OWN_TASKS && run <= OWN_PIECES {
+        // A few threads with a few pieces each: the case of a column that
+        // sits in the cache, where a hand-off of a cache line between cores
+        // costs as much as a tenth of the whole reduction. Every thread
+        // writes its results to lines that nobody else touches while it
+        // works.
+        let mut results = [const { OwnLines([const { std::mem::MaybeUninit::<R>::uninit() }; OWN_PIECES]) }; OWN_TASKS];
+        par::for_each_chunk_mut(&mut results[..chunks], 1, tasks, |chunk, own| {
+            for (k, slot) in own[0].0[..run].iter_mut().enumerate() {
+                let start = (chunk * run + k) * piece;
+                if start >= n {
+                    break;
+                }
+                slot.write(map(&values[start..(start + piece).min(n)]));
+            }
+        });
+        // SAFETY: piece `p` was written above, by chunk `p / run` at index
+        // `p % run`, exactly once; reading it out moves the value, and the
+        // array never drops its slots.
+        return (0..pieces).map(|p| unsafe { results[p / run].0[p % run].assume_init_read() }).fold(init, fold);
+    }
     let mut results: Vec<std::mem::MaybeUninit<R>> = Vec::with_capacity(pieces);
     // SAFETY: `MaybeUninit` needs no initialisation.
     unsafe { results.set_len(pieces) };
     par::for_each_chunk_mut(&mut results, run, tasks, |chunk, slots| {
         for (k, slot) in slots.iter_mut().enumerate() {
-            let start = (chunk * run + k) * PIECE_ROWS;
-            slot.write(map(&values[start..(start + PIECE_ROWS).min(n)]));
+            let start = (chunk * run + k) * piece;
+            slot.write(map(&values[start..(start + piece).min(n)]));
         }
     });
     // SAFETY: every slot was written exactly once above.
     results.into_iter().map(|r| unsafe { r.assume_init() }).fold(init, fold)
+}
+
+/// Most threads, and most pieces per thread, whose results are kept on the
+/// stack in [`OwnLines`].
+const OWN_TASKS: usize = 4;
+const OWN_PIECES: usize = 32;
+
+/// The per-piece results of one thread, on cache lines of their own (two,
+/// because of the adjacent-line prefetcher).
+#[repr(align(128))]
+struct OwnLines<R>([std::mem::MaybeUninit<R>; OWN_PIECES]);
+
+/// One serial, vectorised pass over `values`: the yardstick the work-splitting
+/// policy times to learn how fast a core of this machine streams.
+pub(super) fn calibration_pass(values: &[u64]) -> u64 {
+    sum_serial(values)
 }
 
 /// Sum of all elements. Integers wrap on overflow.
@@ -645,9 +720,33 @@ mod tests {
             let got = sum(&v);
             let want = naive_sum_f64(&v);
             assert!((got - want).abs() <= 1e-9 * want.abs().max(1.0), "n {n}: {got} vs {want}");
-            assert_eq!(got.to_bits(), sum_impl(&v).to_bits(), "vector and scalar builds must agree");
+            // The association order is fixed by the length alone: the same
+            // pieces, summed by the portable build of the kernel.
+            let pieces = v.chunks(piece_rows(n)).map(sum_impl).fold(0.0, |a, b| a + b);
+            assert_eq!(got.to_bits(), pieces.to_bits(), "vector and scalar builds must agree");
             assert_eq!(sum_f64(&v).to_bits(), got.to_bits());
         }
+    }
+
+    #[test]
+    fn pieces_are_even_and_a_sum_does_not_depend_on_who_computes_it() {
+        for n in [1usize, 64, PIECE_ROWS, PIECE_ROWS + 1, 30_000, 100_000, 131_072, 131_073, 1_000_000, 5_000_000] {
+            let piece = piece_rows(n);
+            assert!(piece.is_multiple_of(64) && piece <= PIECE_ROWS.max(64), "n {n}: {piece}");
+            let count = n.div_ceil(piece);
+            if n > PIECE_ROWS && count <= BALANCED_PIECES {
+                assert!(count.is_power_of_two(), "n {n}: {count} pieces");
+                assert!(n - (count - 1) * piece > piece / 2, "n {n}: a stub of a last piece");
+            }
+        }
+        // Small enough to sit in a core's cache on most machines, where the
+        // policy tries both one thread and several: every call must agree.
+        let v: Vec<f64> = (0..30_000).map(|i| ((i * 2654435761usize) % 10007) as f64 / 7.0 - 300.0).collect();
+        let first = sum(&v).to_bits();
+        for _ in 0..400 {
+            assert_eq!(sum(&v).to_bits(), first);
+        }
+        assert_eq!(first, v.chunks(piece_rows(v.len())).map(sum_impl).fold(0.0, |a, b| a + b).to_bits());
     }
 
     #[test]

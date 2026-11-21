@@ -417,8 +417,12 @@ mod tests {
     fn readers_see_consistent_versions_under_concurrent_writes() {
         let shared = SharedFrame::new(pair(20_000));
         let stop = AtomicBool::new(false);
+        // All five threads start together, and every reader checks at least
+        // one version, however the scheduler treats them.
+        let start = std::sync::Barrier::new(5);
         std::thread::scope(|s| {
             let writer = s.spawn(|| {
+                start.wait();
                 for round in 1..=200i64 {
                     shared.write(|df| {
                         // Two columns change together; the invariant b == 2a must
@@ -437,7 +441,9 @@ mod tests {
                     s.spawn(|| {
                         let mut reader = shared.reader();
                         let (mut checks, mut last_epoch) = (0u64, 0u64);
-                        while !stop.load(Ordering::Acquire) {
+                        start.wait();
+                        loop {
+                            let done = stop.load(Ordering::Acquire);
                             let df = reader.get();
                             let a = df["a"].i64().unwrap().cont_slice().unwrap();
                             let b = df["b"].i64().unwrap().cont_slice().unwrap();
@@ -445,14 +451,16 @@ mod tests {
                             assert!(reader.epoch() >= last_epoch, "epochs went backwards");
                             last_epoch = reader.epoch();
                             checks += 1;
+                            if done {
+                                break checks;
+                            }
                         }
-                        checks
                     })
                 })
                 .collect();
             writer.join().unwrap();
             let total: u64 = readers.into_iter().map(|r| r.join().unwrap()).sum();
-            assert!(total > 0);
+            assert!(total >= 4);
         });
         assert_eq!(shared.epoch(), 200);
         let last = shared.snapshot();

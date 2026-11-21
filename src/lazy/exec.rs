@@ -24,7 +24,7 @@ use super::eval::eval_mask;
 use crate::chunked_array::{ChunkedArray, Resolved, Selection, StringChunked, Wide, resolve_cmp};
 use crate::datatypes::{AnyValue, DataType, PlSmallStr, PolarsNumericType};
 use crate::error::PolarsResult;
-use crate::frame::filter::{Sink, emit_block, sink_for};
+use crate::frame::filter::{EmitChoice, Sink, emit_block, sink_for};
 use crate::frame::{AggKind, DataFrame};
 use crate::kernels::aggregate::Num;
 use crate::kernels::pipeline::{self, FenceOnDrop};
@@ -392,6 +392,7 @@ pub(crate) fn filter_frame(df: &DataFrame, predicate: &Expr, projection: Option<
         return Ok(two_phase(tasks));
     };
 
+    let choice = EmitChoice::new(height.div_ceil(block), sinks.len());
     let done = pipeline::scan_then_emit(
         height,
         block,
@@ -401,7 +402,7 @@ pub(crate) fn filter_frame(df: &DataFrame, predicate: &Expr, projection: Option<
         |rows, scratch| compiled.eval(rows, scratch),
         |rows, scratch, offset, count| {
             let Scratch { words, idx, .. } = scratch;
-            emit_block(&sinks, rows, words, offset, count, stream, idx);
+            emit_block(&sinks, rows, words, offset..offset + count, stream, idx, &choice);
         },
     );
     if !done.complete {

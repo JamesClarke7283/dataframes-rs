@@ -987,7 +987,7 @@ macro_rules! df {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunked_array::ChunkCompareIneq;
+    use crate::chunked_array::{ChunkCompareEq, ChunkCompareIneq};
 
     fn sample() -> DataFrame {
         df!(
@@ -1168,6 +1168,28 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_filter_of_many_blocks_is_right_whichever_way_its_blocks_are_written() {
+        use crate::lazy::{IntoLazy, col, lit};
+        // Enough rows for at least 64 blocks at any thread count, which is
+        // what makes the filter time index lists against plain compaction
+        // on its first blocks; one row in sixteen is sparse for every tier.
+        let n = 70 * 65_536usize;
+        let key: Vec<i64> = (0..n as i64).map(|i| (i * 7919 + 13) % 16).collect();
+        let b: Vec<f64> = (0..n).map(|i| i as f64 * 0.25).collect();
+        let c: Vec<i32> = (0..n).map(|i| (i % 100_003) as i32).collect();
+        let df = df!("key" => &key, "b" => &b, "c" => &c).unwrap();
+        let want: Vec<usize> = (0..n).filter(|&i| key[i] == 5).collect();
+        let mask = df["key"].i64().unwrap().equal(5i64);
+        let lazy = df.clone().lazy().filter(col("key").eq(lit(5i64))).collect().unwrap();
+        for (label, out) in [("eager", df.filter(&mask).unwrap()), ("lazy", lazy)] {
+            assert_eq!(out.height(), want.len(), "{label}");
+            assert!(out["key"].i64().unwrap().cont_slice().unwrap().iter().all(|&v| v == 5), "{label}");
+            assert!(out["b"].f64().unwrap().cont_slice().unwrap().iter().zip(&want).all(|(&v, &i)| v == b[i]), "{label}");
+            assert!(out["c"].i32().unwrap().cont_slice().unwrap().iter().zip(&want).all(|(&v, &i)| v == c[i]), "{label}");
         }
     }
 

@@ -45,8 +45,11 @@ pub mod tables;
 pub mod team;
 #[cfg(target_arch = "x86_64")]
 pub mod x86;
+#[cfg(target_arch = "x86_64")]
+pub mod x86_512;
 
 use std::cmp::Ordering as CmpOrdering;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use crate::memory::bitmap::count_ones_range;
@@ -60,21 +63,33 @@ pub enum Level {
     Scalar = 1,
     /// x86-64-v3: AVX2, BMI1/2, POPCNT, LZCNT, FMA.
     Avx2 = 2,
+    /// x86-64-v4: the above plus AVX-512 F, BW, DQ and VL.
+    Avx512 = 3,
 }
 
 static LEVEL: AtomicU8 = AtomicU8::new(0);
+/// Whether AVX-512 VBMI2 (byte and word compression) is available as well.
+static VBMI2: AtomicU8 = AtomicU8::new(0);
 
 /// The instruction-set tier in use. Detected on first call.
 ///
 /// Set `DATAFRAMES_SIMD=scalar` in the environment to force the portable
-/// kernels (useful for testing and for measuring what the vector paths buy).
+/// kernels, or `DATAFRAMES_SIMD=avx2` to stop at AVX2 on a CPU that has
+/// AVX-512 (useful for testing and for measuring what each tier buys).
 #[inline]
 pub fn level() -> Level {
     match LEVEL.load(Ordering::Relaxed) {
         1 => Level::Scalar,
         2 => Level::Avx2,
+        3 => Level::Avx512,
         _ => detect(),
     }
+}
+
+/// `true` if the AVX-512 tier is in use and the CPU also has VBMI2.
+#[inline]
+fn has_vbmi2() -> bool {
+    level() >= Level::Avx512 && VBMI2.load(Ordering::Relaxed) == 1
 }
 
 #[cold]
@@ -90,10 +105,20 @@ fn detect() -> Level {
             && std::is_x86_feature_detected!("fma")
         {
             found = Level::Avx2;
+            if std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512bw")
+                && std::is_x86_feature_detected!("avx512dq")
+                && std::is_x86_feature_detected!("avx512vl")
+            {
+                found = Level::Avx512;
+                VBMI2.store(u8::from(std::is_x86_feature_detected!("avx512vbmi2")), Ordering::Relaxed);
+            }
         }
     }
-    if matches!(std::env::var("DATAFRAMES_SIMD").as_deref(), Ok("scalar")) {
-        found = Level::Scalar;
+    match std::env::var("DATAFRAMES_SIMD").as_deref() {
+        Ok("scalar") => found = Level::Scalar,
+        Ok("avx2") => found = found.min(Level::Avx2),
+        _ => {}
     }
     LEVEL.store(found as u8, Ordering::Relaxed);
     found
@@ -234,8 +259,15 @@ macro_rules! impl_kernel_int {
                     // SAFETY: same-width integer reinterpretation of an initialised slice.
                     let head: &[$signed] =
                         unsafe { std::slice::from_raw_parts(head.as_ptr().cast(), head.len()) };
-                    // SAFETY: AVX2 was detected; `head` is a whole number of words.
-                    let n = unsafe { x86::$avx2::<{ $unsigned }>(head, rhs as $signed, op, out_head) };
+                    // SAFETY: the tier was detected; `head` is a whole number
+                    // of words. The kernels of both tiers have the same name.
+                    let n = unsafe {
+                        if level() >= Level::Avx512 {
+                            x86_512::$avx2::<{ $unsigned }>(head, rhs as $signed, op, out_head)
+                        } else {
+                            x86::$avx2::<{ $unsigned }>(head, rhs as $signed, op, out_head)
+                        }
+                    };
                     return n + if tail.is_empty() { 0 } else { scalar::cmp_scalar(tail, op, rhs, out_tail) };
                 }
                 scalar::cmp_scalar(values, op, rhs, out)
@@ -276,9 +308,15 @@ macro_rules! impl_kernel_float {
                     let full = values.len() / 64 * 64;
                     let (head, tail) = values.split_at(full);
                     let (out_head, out_tail) = out.split_at_mut(full / 64);
-                    // SAFETY: AVX2 was detected; `head` is a whole number of
-                    // words; `rhs` is not NaN.
-                    let n = unsafe { x86::$avx2::<false>(head, rhs, op, out_head) };
+                    // SAFETY: the tier was detected; `head` is a whole number
+                    // of words; `rhs` is not NaN.
+                    let n = unsafe {
+                        if level() >= Level::Avx512 {
+                            x86_512::$avx2::<false>(head, rhs, op, out_head)
+                        } else {
+                            x86::$avx2::<false>(head, rhs, op, out_head)
+                        }
+                    };
                     return n + if tail.is_empty() { 0 } else { scalar::cmp_scalar(tail, op, rhs, out_tail) };
                 }
                 scalar::cmp_scalar(values, op, rhs, out)
@@ -325,6 +363,23 @@ pub unsafe fn compact<T: Pod>(
     stream: bool,
 ) -> usize {
     debug_assert!(mask.len() >= words_for(n));
+    #[cfg(target_arch = "x86_64")]
+    if level() >= Level::Avx512 {
+        // SAFETY: the caller's contract is forwarded unchanged; the pointer
+        // casts keep the element width; AVX-512 (and VBMI2 where it is
+        // needed) was detected.
+        unsafe {
+            match (size_of::<T>(), stream) {
+                (8, true) => return x86_512::compact8_stream(values.cast(), mask, n, out.cast(), out_cap),
+                (4, true) => return x86_512::compact4_stream(values.cast(), mask, n, out.cast(), out_cap),
+                (8, false) => return x86_512::compact8(values.cast(), mask, n, out.cast(), out_cap),
+                (4, false) => return x86_512::compact4(values.cast(), mask, n, out.cast(), out_cap),
+                (2, _) if has_vbmi2() => return x86_512::compact2(values.cast(), mask, n, out.cast(), out_cap),
+                (1, _) if has_vbmi2() => return x86_512::compact1(values.cast(), mask, n, out.cast(), out_cap),
+                _ => {}
+            }
+        }
+    }
     #[cfg(target_arch = "x86_64")]
     if level() >= Level::Avx2 {
         // SAFETY: the caller's contract is forwarded unchanged; the pointer
@@ -403,10 +458,11 @@ unsafe fn compact16(values: *const u64, mask: &[u64], n: usize, out: *mut u64, o
         // as many lanes, and the lane kernels never exceed their cap.
         let lanes = unsafe {
             let (src, dst, cap) = (values.add(2 * wi * 64), out.add(2 * written), 2 * (out_cap - written));
-            if stream {
-                x86::compact8_stream(src, &doubled, 2 * rows, dst, cap)
-            } else {
-                x86::compact8(src, &doubled, 2 * rows, dst, cap)
+            match (level() >= Level::Avx512, stream) {
+                (true, true) => x86_512::compact8_stream(src, &doubled, 2 * rows, dst, cap),
+                (true, false) => x86_512::compact8(src, &doubled, 2 * rows, dst, cap),
+                (false, true) => x86::compact8_stream(src, &doubled, 2 * rows, dst, cap),
+                (false, false) => x86::compact8(src, &doubled, 2 * rows, dst, cap),
             }
         };
         written += lanes / 2;
@@ -425,13 +481,18 @@ pub fn mask_indices(mask: &[u64], n: usize, base: u32) -> AlignedVec<u32> {
         // An empty vector owns no block, so there would be no apron either.
         return Vec::new_in(ColumnAlloc);
     }
-    // The allocator's apron provides the eight slots of vector overhang.
+    // The allocator's apron provides the sixteen slots of vector overhang.
     let mut out: AlignedVec<u32> = Vec::with_capacity_in(count.max(1), ColumnAlloc);
     #[cfg(target_arch = "x86_64")]
     if level() >= Level::Avx2 {
-        // SAFETY: capacity `count` plus a 64-byte apron (16 slots); AVX2 detected.
+        // SAFETY: capacity `count` plus a 64-byte apron (16 slots), which
+        // covers the overhang of either tier; the tier was detected.
         unsafe {
-            let written = x86::mask_indices(mask, n, base, out.as_mut_ptr());
+            let written = if level() >= Level::Avx512 {
+                x86_512::mask_indices(mask, n, base, out.as_mut_ptr())
+            } else {
+                x86::mask_indices(mask, n, base, out.as_mut_ptr())
+            };
             debug_assert_eq!(written, count);
             out.set_len(count);
         }
@@ -456,11 +517,16 @@ pub fn mask_indices_into(mask: &[u64], n: usize, base: u32, out: &mut Vec<u32>) 
     let count = count_ones_range(mask, 0, n);
     #[cfg(target_arch = "x86_64")]
     if level() >= Level::Avx2 {
-        // The vector kernel stores whole vectors: eight slots of overhang.
-        out.reserve(count + 8);
-        // SAFETY: room for `count + 8` writes was just reserved; AVX2 detected.
+        // The vector kernels store whole vectors: up to sixteen slots of overhang.
+        out.reserve(count + 16);
+        // SAFETY: room for `count + 16` writes was just reserved, which
+        // covers the overhang of either tier; the tier was detected.
         unsafe {
-            let written = x86::mask_indices(mask, n, base, out.as_mut_ptr());
+            let written = if level() >= Level::Avx512 {
+                x86_512::mask_indices(mask, n, base, out.as_mut_ptr())
+            } else {
+                x86::mask_indices(mask, n, base, out.as_mut_ptr())
+            };
             debug_assert_eq!(written, count);
             out.set_len(count);
         }
@@ -536,7 +602,8 @@ pub const BLOCK_ROWS: usize = 4096;
 /// `values[i] op rhs` as mask words plus the number of matches.
 /// Uses every core for large inputs.
 pub fn cmp_scalar_mask<T: Kernel>(values: &[T], op: CmpOp, rhs: T) -> (AlignedVec<u64>, usize) {
-    cmp_scalar_mask_with(values, op, rhs, par::tasks_for(values.len(), size_of::<T>()))
+    let plan = par::plan(values.len(), size_of::<T>());
+    cmp_scalar_mask_with(values, op, rhs, plan.tasks())
 }
 
 /// [`cmp_scalar_mask`] with an explicit degree of parallelism.
@@ -547,20 +614,42 @@ pub fn cmp_scalar_mask_with<T: Kernel>(
     tasks: usize,
 ) -> (AlignedVec<u64>, usize) {
     let n = values.len();
-    let mut words: AlignedVec<u64> = zeroed_vec(words_for(n));
+    let len = words_for(n);
+    let mut words: AlignedVec<u64> = Vec::with_capacity_in(len, ColumnAlloc);
+    let slots = &mut words.spare_capacity_mut()[..len];
     let count = if tasks <= 1 || n < 128 {
-        T::cmp_scalar(values, op, rhs, &mut words)
+        T::cmp_scalar(values, op, rhs, cleared(slots))
     } else {
         let rows = par::chunk_rows(n, size_of::<T>(), tasks);
         let total = AtomicUsize::new(0);
-        par::for_each_chunk_mut(&mut words, rows / 64, tasks, |i, w| {
+        par::for_each_chunk_mut(slots, rows / 64, tasks, |i, w| {
             let start = i * rows;
-            let count = T::cmp_scalar(&values[start..(start + rows).min(n)], op, rhs, w);
+            let count = T::cmp_scalar(&values[start..(start + rows).min(n)], op, rhs, cleared(w));
             total.fetch_add(count, Ordering::Relaxed);
         });
         total.into_inner()
     };
+    // SAFETY: every one of the `len` words was cleared, by the thread that
+    // then wrote it.
+    unsafe { words.set_len(len) };
     (words, count)
+}
+
+/// Zero `slots` and hand them back as words.
+///
+/// The thread that will write a part of a mask clears it, not the caller for
+/// everybody: a buffer that comes back from the pool is in the caches of the
+/// cores that wrote it last time, part by part, and a caller that cleared all
+/// of it would pull the other threads' parts over to its own core only for
+/// them to be pulled back a moment later.
+#[inline]
+fn cleared(slots: &mut [MaybeUninit<u64>]) -> &mut [u64] {
+    // SAFETY: zero is a valid word; after the fill every slot is initialised,
+    // and `MaybeUninit<u64>` has the layout of `u64`.
+    unsafe {
+        std::ptr::write_bytes(slots.as_mut_ptr(), 0, slots.len());
+        &mut *(std::ptr::from_mut(slots) as *mut [u64])
+    }
 }
 
 /// `lhs[i] op rhs[i]` as mask words plus the number of matches.
@@ -570,27 +659,33 @@ pub fn cmp_scalar_mask_with<T: Kernel>(
 pub fn cmp_values_mask<T: Kernel>(lhs: &[T], rhs: &[T], op: CmpOp) -> (AlignedVec<u64>, usize) {
     assert_eq!(lhs.len(), rhs.len(), "comparison operands must have equal length");
     let n = lhs.len();
-    let mut words: AlignedVec<u64> = zeroed_vec(words_for(n));
-    let tasks = par::tasks_for(n, 2 * size_of::<T>());
+    let len = words_for(n);
+    let mut words: AlignedVec<u64> = Vec::with_capacity_in(len, ColumnAlloc);
+    let slots = &mut words.spare_capacity_mut()[..len];
+    let plan = par::plan(n, 2 * size_of::<T>());
+    let tasks = plan.tasks();
     let count = if tasks <= 1 || n < 128 {
-        T::cmp_values(lhs, rhs, op, &mut words)
+        T::cmp_values(lhs, rhs, op, cleared(slots))
     } else {
         let rows = par::chunk_rows(n, 2 * size_of::<T>(), tasks);
         let total = AtomicUsize::new(0);
-        par::for_each_chunk_mut(&mut words, rows / 64, tasks, |i, w| {
+        par::for_each_chunk_mut(slots, rows / 64, tasks, |i, w| {
             let range = i * rows..((i + 1) * rows).min(n);
-            let count = T::cmp_values(&lhs[range.clone()], &rhs[range], op, w);
+            let count = T::cmp_values(&lhs[range.clone()], &rhs[range], op, cleared(w));
             total.fetch_add(count, Ordering::Relaxed);
         });
         total.into_inner()
     };
+    // SAFETY: as in `cmp_scalar_mask_with`.
+    unsafe { words.set_len(len) };
     (words, count)
 }
 
 /// The elements of `values` whose bit is set in `mask` (aligned words covering
 /// `values.len()` bits). Uses every core for large inputs.
 pub fn filter_by_mask<T: Pod>(values: &[T], mask: &[u64]) -> AlignedVec<T> {
-    filter_by_mask_with(values, mask, par::tasks_for(values.len(), size_of::<T>()), None)
+    let plan = par::plan(values.len(), size_of::<T>());
+    filter_by_mask_with(values, mask, plan.tasks(), None)
 }
 
 /// [`filter_by_mask`] with the degree of parallelism and the store policy
@@ -742,7 +837,8 @@ pub fn count_cmp_scalar<T: Kernel>(values: &[T], op: CmpOp, rhs: T) -> usize {
         v.chunks(BLOCK_ROWS).map(|b| T::cmp_scalar(b, op, rhs, &mut words)).sum()
     };
     let n = values.len();
-    let tasks = par::tasks_for(n, size_of::<T>());
+    let plan = par::plan(n, size_of::<T>());
+    let tasks = plan.tasks();
     if tasks <= 1 {
         return serial(values);
     }

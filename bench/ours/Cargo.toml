@@ -8,6 +8,7 @@ description = "Benchmark driver for dataframes (this repository)."
 [dependencies]
 bench-common = { path = "../common" }
 dataframes = { path = "../.." }
+libc = "0.2"
 mimalloc = { version = "0.1", default-features = false, optional = true }
 
 [features]

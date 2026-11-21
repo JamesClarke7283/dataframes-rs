@@ -123,16 +123,16 @@ fn main() {
 
 A filter is two kernels joined by a bitmask: *compare* turns 64 rows into one mask word, *compact* turns a word and 64 rows into the surviving rows.
 
-- **Compare → bitmask** for all ten numeric types with AVX2: three base predicates per type plus a complement cover the six operators; unsigned types use a sign-bit bias; floats follow a total order (NaN equals NaN and sorts last).
-- **Table-driven compaction** without data-dependent branches: `vpermd` for 4- and 8-byte elements, `pshufb` for 1- and 2-byte elements, and 16-byte string views through the 8-byte kernel with doubled mask bits. The output offsets of all steps of a mask word come from its population counts up front, so no step waits for the previous one.
+- **Compare → bitmask** for all ten numeric types, with AVX-512 where the CPU has it and AVX2 otherwise. AVX-512 compares into mask registers and stores them straight into the bitmap (the mask of eight 64-bit lanes is one byte of it); with AVX2, three base predicates per type plus a complement cover the six operators and unsigned types use a sign-bit bias. Floats follow a total order (NaN equals NaN and sorts last).
+- **Compaction without data-dependent branches:** `vpcompress` with AVX-512; with AVX2, table-driven `vpermd` for 4- and 8-byte elements and `pshufb` for 1- and 2-byte elements. 16-byte string views go through the 8-byte kernel with doubled mask bits. The output offsets of all steps of a mask word come from its population counts up front, so no step waits for the previous one.
 - **Sparse stretches use scalar steps** — the density of each group of mask words picks a fixed number of "lowest set bit, copy, clear" steps per word, again without a data-dependent branch.
 - **Fusion** — when predicate and payload are the same column, the two kernels alternate over cache-sized blocks, so each block is compacted while it is still in L1/L2 and the column crosses the memory bus once.
 - **Parallel and still contiguous** — the ordered-commit pipeline lets every core scan a block, take its output offset in a two-atomic-operation critical section, and compact into one shared allocation. The result is exactly what a sequential filter produces.
 - **Non-temporal stores for results larger than the cache** — skipping the read-for-ownership of every output line removes a third of the memory traffic of a 50 % filter.
-- **Frames share row-index lists** — a frame is filtered block by block over all its columns; a block keeping at most two rows in five turns its mask into a list of row indices once, and every column is gathered through it.
-- **Small columns go parallel too** — the kernels run on a fork-join team whose workers keep polling for 100 µs after a parallel region, so the next region starts in about half a microsecond and columns from 64 KiB upwards use every core.
+- **Frames share row-index lists** — a frame is filtered block by block over all its columns; a block keeping at most two rows in five turns its mask into a list of row indices once, and every column is gathered through it. Whether that beats compacting each column through the mask depends on the CPU once the data no longer fits in the cache — a third slower on one current server core, a third faster on another — so a filter over many blocks times both ways on its first blocks and keeps the faster.
+- **Small columns go parallel too — where it pays** — the kernels run on a fork-join team whose workers keep polling for 100 µs after a parallel region, so the next region starts in a fraction of a microsecond. For a column that fits in a core's cache, whether a second core helps depends on where the data is: two cores that each already hold their half finish in half the time of one, but if the calling thread has just written the column, the second core has to fetch it line by line and the split takes two to three times longer. No rule on sizes can tell the two apart, so the library measures: a few timed calls each way, repeated at growing intervals, decide per size class whether to split. Each thread always gets the same part of the column, and each helper a physical core of its own, away from the caller's.
 - **Predicates on frames are compiled** — `a < 5 & b > 2.0` becomes a tree of block kernels and is fused with the compaction of every output column; `filter(...).select([sum])` adds every row under a lane mask, so the selected rows are never materialised or even compacted.
-- **Run-time dispatch** — the crate compiles for the baseline of its target and selects the AVX2 kernels at run time, once. `DATAFRAMES_SIMD=scalar` forces the portable kernels, which are also the reference the vector kernels are tested against.
+- **Run-time dispatch** — the crate compiles for the baseline of its target and selects the AVX-512 or AVX2 kernels at run time, once. `DATAFRAMES_SIMD=scalar` forces the portable kernels, which are also the reference every vector kernel is tested against.
 
 ## Smart pointers for zero-overhead slicing
 
@@ -200,7 +200,7 @@ The implementation must balance extreme retrieval speeds with the complexity of 
 - **Offsets are applied when slicing, not when reading.** A view stores a pointer that is already offset, so reading through a slice costs exactly what reading the original costs. The price is one more word per handle than a bare `Arc`.
 - **One chunk per column.** Appending may reallocate (amortised, and in place when the buffer is uniquely owned or has spare capacity past every view), but element access never searches a chunk list.
 - **Layout guarantees live in one `unsafe impl`.** Kernels may assume alignment and the apron because `ColumnAlloc` promises them, instead of each call site re-proving it.
-- **Parallelism has to earn its keep.** Workers that poll briefly instead of sleeping make the hand-off cheap enough for cache-sized columns; the price is a burst of idle CPU after each parallel region (`DATAFRAMES_SPIN_US=0` turns it off). Sleeping workers are woken only for inputs that repay the system call.
+- **Parallelism has to earn its keep.** Workers that poll briefly instead of sleeping make the hand-off cheap enough for cache-sized columns; the price is a burst of idle CPU after each parallel region (`DATAFRAMES_SPIN_US=0` turns it off). Sleeping workers are woken only for inputs that repay the system call. And a column small enough to live in one core's cache is split only while measurements say that the caller's loop as a whole gets faster by it — moving data between cores can cost more than a second core gives.
 - **Determinism is kept where it is cheap.** Parallel filters produce the sequential result byte for byte; floating-point sums use a fixed association order and are bit-identical across thread counts and vector widths.
 - **No hidden global state on the hot path.** CPU features, cache sizes and the thread pool are resolved once; afterwards a kernel call is a predictable branch away from its loop.
 
@@ -251,8 +251,22 @@ Every number behind the charts, per library: [bench/results/latest.md](bench/res
 - **The strongest spelling wins.** Where a library offers several ways to do one thing (eager, lazy or streaming engine in Polars; `query` or mask in pandas; a fused single-pass call here), all are timed and the best one is reported.
 - **Same data, same answer.** All drivers read bit-identical columns generated from a fixed seed and report a check value per case; the report refuses to rank results that disagree.
 - **Interleaved runs.** Libraries take turns case by case, for several rounds, so frequency scaling, thermal limits and noisy neighbours hit all of them alike. The reported time is the best median over the rounds.
-- **Level means level.** A difference below 3 % is reported as level, not as a win, and the workflow fails on any case that is slower.
-- **Nothing is switched on for the benchmark.** dataframes runs with its defaults. One of them matters in a timing loop: its worker threads keep polling for 100 µs after a call, so back-to-back calls always find them awake. Set `DATAFRAMES_SPIN_US=0` to measure without it; [`scripts/tune.py`](scripts/tune.py) and the tuning workflow compare such settings side by side.
+- **Level means level.** A difference below 5 % — about what identical code varies by between two processes on a shared cloud machine — is reported as level, not as a win. So is a difference that does not show in every round: each round is a fresh process for every library, and a best time that one lucky process reached and the next did not is noise, whichever library it flatters. The workflow fails on any case that is slower. Some cases can only be level: a point look-up is a bounds check and a load in every library.
+- **Runners differ.** GitHub-hosted runners are several CPU models — AMD Zen 3 (AVX2 only), Zen 4 and Zen 5, Intel Ice Lake, Emerald Rapids and Granite Rapids (all with AVX-512) have turned up, with private caches from 512 KiB to 2 MiB, and what is fastest on one is not on another. The block above names the machine of the last run; the [probe workflow](.github/workflows/probe.yml) reruns the whole suite on a chosen model.
+
+  The whole suite on every CPU model that turned up in one batch of sixteen probe runs (commit `b032b94`, 21 November 2026, three rounds each):
+
+  | runner CPU | runs | fastest in, of 75 | level | slower | geometric-mean speed-up |
+  |---|---:|---:|---:|---:|---:|
+  | AMD EPYC 7763 (Zen 3, AVX2 only) | 4 | 74 – 75 | 0 – 1 | 0 | 2.71x – 2.84x |
+  | AMD EPYC 9V74 (Zen 4) | 3 | 73 | 2 | 0 | 2.26x – 2.47x |
+  | AMD EPYC 9V45 (Zen 5) | 2 | 72 – 74 | 1 – 3 | 0 | 2.14x – 2.16x |
+  | Intel Xeon Platinum 8573C (Emerald Rapids) | 1 | 74 | 1 | 0 | 2.55x |
+  | Intel Xeon 6973P-C (Granite Rapids) | 1 | 73 | 2 | 0 | 2.52x |
+  | Intel Xeon 6975P-C (Granite Rapids) | 5 | 72 – 75 | 0 – 3 | 0 | 2.42x – 2.54x |
+
+  The level cases: the thousand point look-ups on four of the six models (on the 6975P-C at ten million rows arrow-rs took 0.53 µs in some processes and 0.78 µs in others, dataframes 0.56 µs in all of them), three reductions over ten million rows on the Zen 5, where two cores share one memory bus and a round now and then ties, and one 10 ns slice.
+- **Nothing is switched on for the benchmark.** dataframes runs with its defaults. Two of them matter in a timing loop: its worker threads keep polling for 100 µs after a call, so back-to-back calls always find them awake, and a loop that repeats one call on one column is exactly the case in which splitting a small column pays, which the library finds out within a few dozen calls. Set `DATAFRAMES_SPIN_US=0` or `DATAFRAMES_THREADS=1` to measure without them; [`scripts/tune.py`](scripts/tune.py) and the tuning workflow compare such settings side by side.
 
 **Run it yourself**
 
@@ -272,9 +286,11 @@ Read once, from the environment, when first needed.
 |---|---|---|
 | `DATAFRAMES_THREADS` | threads a kernel spreads its input over; `1` disables intra-column parallelism | one per hardware thread |
 | `DATAFRAMES_SPIN_US` | how long idle workers keep polling before they sleep; `0` makes them sleep at once | `100` |
+| `DATAFRAMES_HOME_CORES` | `0` leaves the placement of all worker threads to the scheduler, instead of keeping one worker on every physical core other than the caller's (Linux) | on |
 | `DATAFRAMES_MIN_TASK_BYTES` | smallest piece of input handed to a thread | `32768` |
-| `DATAFRAMES_SIMD=scalar` | use the portable kernels instead of AVX2 | detect |
-| `DATAFRAMES_STREAM_BYTES` | result size from which non-temporal stores are used | size of the last-level cache |
+| `DATAFRAMES_SIMD` | `scalar` uses the portable kernels, `avx2` stops at AVX2 on a CPU with AVX-512 | detect |
+| `DATAFRAMES_STREAM_BYTES` | result size from which non-temporal stores are used | size of the last-level cache, at most 32 MiB |
+| `DATAFRAMES_INDEX_EMIT_PERMILLE` | a frame filter gathers through a shared list of row indices while a block keeps at most this many rows per thousand | `125` with AVX-512, `400` with AVX2 |
 | `DATAFRAMES_POOL_LIMIT_MB` | cap on recycled large blocks | a quarter of RAM |
 | `DATAFRAMES_NO_POOL`, `DATAFRAMES_NO_HUGEPAGES` | switch off block recycling, or huge pages | off |
 
@@ -283,7 +299,7 @@ Read once, from the environment, when first needed.
 - **Version 0.1.** The memory, kernel and concurrency layers are the point of the crate and are tested accordingly; the API surface covers the core of Polars and pandas, not all of either.
 - **In memory only.** No CSV, Parquet or IPC readers yet.
 - **Types:** no temporal, decimal, categorical or nested types yet.
-- **Vector kernels:** AVX2 on x86-64, selected at run time; other targets run the portable kernels.
+- **Vector kernels:** AVX-512 and AVX2 on x86-64, selected at run time; other targets run the portable kernels.
 - **Huge pages and block recycling** use `mmap`/`madvise` on Unix; elsewhere large blocks come from the global allocator.
 
 ## License

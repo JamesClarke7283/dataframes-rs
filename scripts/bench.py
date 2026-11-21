@@ -14,8 +14,9 @@ thing, and writes a Markdown table, a JSON summary and an SVG chart. With
 `bench:end` markers of that file.
 
 A comparison counts as a win when dataframes is more than `--tie` (default
-3 %) faster than the fastest competitor, as level when the two are within
-that band of each other, and as a loss otherwise. `--gate` fails on losses
+5 %, about what identical code varies by between two processes on a shared
+cloud machine) faster than the fastest competitor, as level when the two are
+within that band of each other, and as a loss otherwise. `--gate` fails on losses
 and on results that disagree between libraries.
 
 Only the Python standard library is used.
@@ -162,14 +163,23 @@ def load(path):
 
 
 def reduce(records):
-    """-> {rows: {case: {lib: {"ns": best median, "variant": name, "check": value}}}}"""
+    """-> {rows: {case: {lib: {"ns": best median, "variant": name, "check": value, "rounds": [...]}}}}
+
+    "rounds" holds, per round, the best median over the variants of that
+    round. The records of one (library, case, size) are in round order.
+    """
     best = defaultdict(lambda: defaultdict(dict))
+    seen = defaultdict(int)
     for r in records:
         case, _, variant = r["case"].partition("@")
+        key = (r["rows"], r["case"], r["lib"])
+        rnd, seen[key] = seen[key], seen[key] + 1
         slot = best[r["rows"]][case]
-        cur = slot.get(r["lib"])
-        if cur is None or r["median_ns"] < cur["ns"]:
-            slot[r["lib"]] = {"ns": r["median_ns"], "variant": variant, "check": r["check"]}
+        cur = slot.setdefault(r["lib"], {"ns": math.inf, "variant": "", "check": r["check"], "rounds": []})
+        cur["rounds"] += [math.inf] * (rnd + 1 - len(cur["rounds"]))
+        cur["rounds"][rnd] = min(cur["rounds"][rnd], r["median_ns"])
+        if r["median_ns"] < cur["ns"]:
+            cur.update(ns=r["median_ns"], variant=variant, check=r["check"])
     return best
 
 
@@ -190,6 +200,13 @@ def summarise(best):
             ours = entries["dataframes"]["ns"]
             rivals = {lib: e["ns"] for lib, e in entries.items() if lib != "dataframes"}
             fastest_rival = min(rivals, key=rivals.get) if rivals else None
+            # The same comparison round by round: the fastest competitor of
+            # each round against our time in that round.
+            rounds = min((len(e["rounds"]) for e in entries.values()), default=0)
+            by_round = [
+                min(e["rounds"][i] for lib, e in entries.items() if lib != "dataframes") / entries["dataframes"]["rounds"][i]
+                for i in range(rounds)
+            ] if rivals else []
             summary.append(
                 {
                     "rows": rows,
@@ -198,27 +215,37 @@ def summarise(best):
                     "variant": {lib: e["variant"] for lib, e in entries.items() if e["variant"]},
                     "fastest_rival": fastest_rival,
                     "speedup": (rivals[fastest_rival] / ours) if fastest_rival else None,
+                    "speedup_by_round": by_round,
                     "checks_agree": checks_agree(entries),
                 }
             )
     return summary
 
 
-def verdict(speedup, tie):
-    """'win', 'level' or 'loss' for a speed-up over the fastest competitor."""
-    if speedup >= 1.0 + tie:
+def verdict(entry, tie):
+    """'win', 'level' or 'loss' for one comparison.
+
+    A win is a speed-up over the fastest competitor of more than `tie`, a
+    loss the same the other way - and either must show in every round. A
+    difference that one round has and the next has not is noise: libraries
+    whose best-ever time is one lucky process out of several are level.
+    """
+    speedup, by_round = entry["speedup"], entry.get("speedup_by_round") or []
+    if speedup >= 1.0 + tie and all(x > 1.0 for x in by_round):
         return "win"
-    return "level" if speedup > 1.0 - tie else "loss"
+    if speedup <= 1.0 - tie and all(x < 1.0 for x in by_round):
+        return "loss"
+    return "level"
 
 
 def headline(summary, tie):
     speedups = [s["speedup"] for s in summary if s["speedup"]]
-    kinds = [verdict(x, tie) for x in speedups]
+    kinds = [verdict(s, tie) for s in summary if s["speedup"]]
     wins, level, losses = kinds.count("win"), kinds.count("level"), kinds.count("loss")
     geo = math.exp(sum(math.log(x) for x in speedups) / len(speedups)) if speedups else float("nan")
     text = f"**dataframes is the fastest library in {wins} of {len(speedups)} comparisons**"
     if level:
-        text += f", level with the fastest (within {tie:.0%}) in {level}"
+        text += f", level with the fastest (within {tie:.0%}, or not in every round) in {level}"
     text += f" and slower in {losses}" if losses else " and slower in none"
     text += (f". Geometric-mean speed-up over the fastest competitor: **{geo:.2f}x** "
              f"(smallest {min(speedups):.2f}x, largest {max(speedups):.2f}x).")
@@ -259,7 +286,7 @@ def markdown(summary, meta, tie):
                 cell = "-"
             else:
                 mark = "" if s["checks_agree"] else " ⚠ results differ"
-                note = {"win": "", "level": " level", "loss": " slower"}[verdict(s["speedup"], tie)]
+                note = {"win": "", "level": " level", "loss": " slower"}[verdict(s, tie)]
                 cell = f"**{s['speedup']:.2f}x**{note} ({LIB_TITLES[s['fastest_rival']]}){mark}"
             lines.append(f"| {CASE_TITLES[s['case']]} | " + " | ".join(cells) + f" | {cell} |")
     return "\n".join(lines) + "\n"
@@ -298,7 +325,7 @@ def svg_chart(summary, rows, tie):
     for i, s in enumerate(items):
         y = top + i * row_h
         x = label_w + scale(s["speedup"])
-        cls = {"win": "b", "level": "e", "loss": "l"}[verdict(s["speedup"], tie)]
+        cls = {"win": "b", "level": "e", "loss": "l"}[verdict(s, tie)]
         out.append(f'<text class="t" x="{label_w - 8}" y="{y + 14}" text-anchor="end">{CASE_TITLES[s["case"]].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")}</text>')
         out.append(f'<rect class="{cls}" x="{min(one, x):.1f}" y="{y + 3}" width="{max(abs(x - one), 2.0):.1f}" height="{row_h - 8}" rx="2"/>')
         out.append(f'<text class="t" x="{max(one, x) + 6:.1f}" y="{y + 14}">{s["speedup"]:.2f}x</text>')
@@ -374,7 +401,7 @@ def report(args):
     out_dir.mkdir(parents=True, exist_ok=True)
     name = args.name
     for s in summary:
-        s["verdict"] = verdict(s["speedup"], args.tie) if s["speedup"] else None
+        s["verdict"] = verdict(s, args.tie) if s["speedup"] else None
     md = markdown(summary, meta, args.tie)
     (out_dir / f"{name}.md").write_text(md)
     (out_dir / f"{name}.json").write_text(json.dumps({"meta": meta, "tie": args.tie, "results": summary}, indent=1) + "\n")
@@ -420,7 +447,7 @@ def main():
     t.add_argument("--out-dir", default=str(RESULTS))
     t.add_argument("--name", default="latest")
     t.add_argument("--gate", action="store_true", help="exit 1 if dataframes is slower than a competitor anywhere")
-    t.add_argument("--tie", type=float, default=0.03, help="relative difference below which two libraries count as level")
+    t.add_argument("--tie", type=float, default=0.05, help="relative difference below which two libraries count as level")
     t.add_argument("--readme", default=None, help="README whose bench:start/bench:end block to refresh")
     t.set_defaults(func=report)
     args = p.parse_args()

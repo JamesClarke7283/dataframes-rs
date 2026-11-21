@@ -294,7 +294,104 @@ fn level_is_detected_once_and_stable() {
     assert_eq!(level(), first);
     #[cfg(all(target_arch = "x86_64", not(miri)))]
     if std::is_x86_feature_detected!("avx2") && std::env::var("DATAFRAMES_SIMD").is_err() {
-        assert_eq!(first, Level::Avx2);
+        assert!(first >= Level::Avx2);
+        assert_eq!(first == Level::Avx512, std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512vl"));
+    }
+}
+
+/// Every tier the CPU offers must give the answers of the portable kernels.
+/// The suite runs with whichever tier `level()` picks; this test also calls
+/// the kernels of the tiers below it directly, so that one run on an AVX-512
+/// machine covers the AVX2 kernels too.
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn every_available_tier_matches_the_portable_kernels() {
+    if level() < Level::Avx2 {
+        return;
+    }
+    let avx512 = level() >= Level::Avx512;
+    let mut rng = Rng::new(71);
+    for &n in &[64usize, 128, 1024, 4096, 4160] {
+        let v64: Vec<i64> = (0..n).map(|_| rng.below(1000) as i64 - 500).collect();
+        let v32: Vec<i32> = v64.iter().map(|&v| v as i32).collect();
+        let f64s: Vec<f64> = v64.iter().map(|&v| if v % 97 == 0 { f64::NAN } else { v as f64 * 0.5 }).collect();
+        let words = n / 64;
+        for op in OPS {
+            for rhs in [-500i64, -3, 0, 250, 499] {
+                let mut want = vec![0u64; words];
+                let mut got = vec![0u64; words];
+                let count = scalar::cmp_scalar(&v64, op, rhs, &mut want);
+                // SAFETY: the tiers called were detected; lengths are whole words.
+                unsafe {
+                    assert_eq!(x86::cmp_scalar_i64::<false>(&v64, rhs, op, &mut got), count);
+                    assert_eq!(got, want, "avx2 i64 {op:?} {rhs}");
+                    if avx512 {
+                        assert_eq!(x86_512::cmp_scalar_i64::<false>(&v64, rhs, op, &mut got), count);
+                        assert_eq!(got, want, "avx512 i64 {op:?} {rhs}");
+                    }
+                }
+                let count = scalar::cmp_scalar(&v32, op, rhs as i32, &mut want);
+                // SAFETY: as above.
+                unsafe {
+                    assert_eq!(x86::cmp_scalar_i32::<false>(&v32, rhs as i32, op, &mut got), count);
+                    assert_eq!(got, want, "avx2 i32 {op:?} {rhs}");
+                    if avx512 {
+                        assert_eq!(x86_512::cmp_scalar_i32::<false>(&v32, rhs as i32, op, &mut got), count);
+                        assert_eq!(got, want, "avx512 i32 {op:?} {rhs}");
+                    }
+                }
+                let count = scalar::cmp_scalar(&f64s, op, rhs as f64 * 0.5, &mut want);
+                // SAFETY: as above; the scalar operand is not NaN.
+                unsafe {
+                    assert_eq!(x86::cmp_scalar_f64::<false>(&f64s, rhs as f64 * 0.5, op, &mut got), count);
+                    assert_eq!(got, want, "avx2 f64 {op:?} {rhs}");
+                    if avx512 {
+                        assert_eq!(x86_512::cmp_scalar_f64::<false>(&f64s, rhs as f64 * 0.5, op, &mut got), count);
+                        assert_eq!(got, want, "avx512 f64 {op:?} {rhs}");
+                    }
+                }
+            }
+        }
+        for density in [0, 2, 10, 50, 98, 100] {
+            let bools = random_mask(&mut rng, n, density, false);
+            let mask = mask_from(&bools);
+            let want64: Vec<u64> = v64.iter().zip(&bools).filter(|(_, b)| **b).map(|(&v, _)| v as u64).collect();
+            let want32: Vec<u32> = v32.iter().zip(&bools).filter(|(_, b)| **b).map(|(&v, _)| v as u32).collect();
+            let want_idx: Vec<u32> = (0..n as u32).filter(|&i| bools[i as usize]).collect();
+            for stream in [false, true] {
+                let mut out64 = vec![0u64; want64.len() + 64];
+                let mut out32 = vec![0u32; want32.len() + 64];
+                // SAFETY: the outputs have 64 slots of slack, more than any
+                // kernel's overhang; the tiers called were detected.
+                unsafe {
+                    let (p64, p32) = (v64.as_ptr().cast::<u64>(), v32.as_ptr().cast::<u32>());
+                    let (c64, c32) = (out64.len(), out32.len());
+                    let n64 = if stream { x86::compact8_stream(p64, &mask, n, out64.as_mut_ptr(), c64) } else { x86::compact8(p64, &mask, n, out64.as_mut_ptr(), c64) };
+                    let n32 = if stream { x86::compact4_stream(p32, &mask, n, out32.as_mut_ptr(), c32) } else { x86::compact4(p32, &mask, n, out32.as_mut_ptr(), c32) };
+                    pipeline::stream_fence();
+                    assert_eq!((&out64[..n64], &out32[..n32]), (&want64[..], &want32[..]), "avx2 density {density} stream {stream}");
+                    if avx512 {
+                        out64.fill(0);
+                        out32.fill(0);
+                        let n64 = if stream { x86_512::compact8_stream(p64, &mask, n, out64.as_mut_ptr(), c64) } else { x86_512::compact8(p64, &mask, n, out64.as_mut_ptr(), c64) };
+                        let n32 = if stream { x86_512::compact4_stream(p32, &mask, n, out32.as_mut_ptr(), c32) } else { x86_512::compact4(p32, &mask, n, out32.as_mut_ptr(), c32) };
+                        pipeline::stream_fence();
+                        assert_eq!((&out64[..n64], &out32[..n32]), (&want64[..], &want32[..]), "avx512 density {density} stream {stream}");
+                    }
+                }
+            }
+            let mut idx = vec![0u32; want_idx.len() + 16];
+            // SAFETY: sixteen slots of slack cover either tier's overhang.
+            unsafe {
+                let written = x86::mask_indices(&mask, n, 0, idx.as_mut_ptr());
+                assert_eq!(&idx[..written], &want_idx[..], "avx2 indices density {density}");
+                if avx512 {
+                    idx.fill(0);
+                    let written = x86_512::mask_indices(&mask, n, 0, idx.as_mut_ptr());
+                    assert_eq!(&idx[..written], &want_idx[..], "avx512 indices density {density}");
+                }
+            }
+        }
     }
 }
 
@@ -310,12 +407,20 @@ fn mask_indices_match_model() {
             #[cfg(target_arch = "x86_64")]
             if level() >= Level::Avx2 {
                 const GUARD: u32 = 0xDEAD_BEEF;
-                let mut out = vec![GUARD; want.len() + 8 + 16];
+                let mut out = vec![GUARD; want.len() + 16 + 16];
                 // SAFETY: `want.len() + 8` slots are writable; AVX2 detected.
                 let written = unsafe { x86::mask_indices(&mask, n, 7, out.as_mut_ptr()) };
                 assert_eq!(written, want.len());
                 assert_eq!(&out[..written], &want[..]);
                 assert!(out[want.len() + 8..].iter().all(|&g| g == GUARD), "wrote past the allowed overhang");
+                if level() >= Level::Avx512 {
+                    out.fill(GUARD);
+                    // SAFETY: `want.len() + 16` slots are writable; AVX-512 detected.
+                    let written = unsafe { x86_512::mask_indices(&mask, n, 7, out.as_mut_ptr()) };
+                    assert_eq!(written, want.len());
+                    assert_eq!(&out[..written], &want[..]);
+                    assert!(out[want.len() + 16..].iter().all(|&g| g == GUARD), "wrote past the allowed overhang");
+                }
             }
         }
     }

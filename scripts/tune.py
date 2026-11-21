@@ -29,6 +29,10 @@ SETTINGS = {
     "1 MiB per task": {"DATAFRAMES_MIN_TASK_BYTES": str(1 << 20)},
     "no streaming stores": {"DATAFRAMES_STREAM_BYTES": str(1 << 60)},
     "no huge pages": {"DATAFRAMES_NO_HUGEPAGES": "1"},
+    "no index lists": {"DATAFRAMES_INDEX_EMIT_PERMILLE": "0"},
+    "index lists to 40%": {"DATAFRAMES_INDEX_EMIT_PERMILLE": "400"},
+    "AVX2 tier": {"DATAFRAMES_SIMD": "avx2"},
+    "workers placed by the scheduler": {"DATAFRAMES_HOME_CORES": "0"},
 }
 
 DEFAULT_CASES = [

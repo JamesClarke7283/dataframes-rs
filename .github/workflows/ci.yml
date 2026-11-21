@@ -35,6 +35,11 @@ jobs:
             os: ubuntu-latest
             rustflags: "-C target-cpu=native"
             simd: auto
+          # Stop at AVX2 even where the runner has AVX-512 (runners differ).
+          - name: x86-64, AVX2 tier
+            os: ubuntu-latest
+            rustflags: ""
+            simd: avx2
           # The portable reference kernels, which the vector ones are checked against.
           - name: x86-64, scalar kernels
             os: ubuntu-latest

@@ -399,7 +399,8 @@ impl StringChunked {
         if sel.is_none() {
             return Self::new_empty(self.name.clone());
         }
-        let tasks = tasks.unwrap_or_else(|| par::tasks_for(self.len(), size_of::<View>()));
+        let plan = tasks.is_none().then(|| par::plan(self.len(), size_of::<View>()));
+        let tasks = tasks.or(plan.as_ref().map(par::Plan::tasks)).unwrap_or(1);
         let views = kernels::filter_by_mask_with(&self.views, &sel.words, tasks, Some(false));
         let validity = self.validity.as_ref().map(|v| {
             Bitmap::from_words(kernels::compact_bits(&v.words(), &sel.words, sel.len, sel.count), sel.count)

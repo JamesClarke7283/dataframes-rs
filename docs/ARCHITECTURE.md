@@ -73,7 +73,7 @@ to, as they do in Polars.)
 | module | files | what it owns | what it must not know |
 |--------|-------|--------------|-----------------------|
 | `memory` | `alloc.rs`, `buffer.rs`, `bitmap.rs` | the layout contract, lifetime of bytes, sharing, copy-on-write | columns, types, names |
-| `kernels` | `x86.rs`, `scalar.rs`, `tables.rs`, `aggregate.rs`, `arith.rs`, `pipeline.rs`, `par.rs`, `team.rs`, `cache.rs` | every hot loop; CPU-feature dispatch; cache and thread policy; the fork-join team | nulls as a concept, names, frames |
+| `kernels` | `x86.rs`, `x86_512.rs`, `scalar.rs`, `tables.rs`, `aggregate.rs`, `arith.rs`, `pipeline.rs`, `par.rs`, `team.rs`, `cache.rs` | every hot loop; CPU-feature dispatch; cache and thread policy; the fork-join team | nulls as a concept, names, frames |
 | `datatypes` | `mod.rs`, `any_value.rs`, `small_str.rs` | the logical vocabulary | storage |
 | `chunked_array` | `mod.rs`, `ops.rs`, `boolean.rs`, `string.rs` | typed columns: values + validity, and the typed operations on them | other columns |
 | `series` | `mod.rs`, `arithmetic.rs`, `comparison.rs`, `pandas.rs` | run-time typing and dispatch | frames |
@@ -273,11 +273,22 @@ A filter is two kernels joined by a bitmask.
 
 ### 4.1 Compare → bitmask
 
-- AVX2 kernels for all ten numeric types produce one mask word per 64 rows.
-- Six operators are covered by three vector predicates per type and an
-  optional complement of the finished word.
-- Unsigned integers are compared as signed after flipping the sign bit of both
-  operands.
+- Kernels for all ten numeric types produce one mask word per 64 rows.
+- **AVX-512:** a comparison writes its result to a mask register, and a mask
+  register is stored to memory as it is: the mask of eight 64-bit lanes *is*
+  one byte of the bitmap. A word is one to eight "load, compare, store the
+  mask" steps with no sign-bit extraction and no detour through a general
+  register — moving a mask there, eight times per word of 64-bit rows, was the
+  slowest step of the obvious loop, and the compiler turned the equally
+  obvious way of joining the eight masks into something slower still (it
+  vectorised the shifts and ORs). The set bits are counted afterwards in one
+  pass over the finished words. All six operators exist for signed, unsigned
+  and floating-point lanes. A mask buffer is cleared by the thread that
+  writes each part of it, not by the caller for everybody, so that a recycled
+  buffer stays in the caches of the cores that use it.
+- **AVX2:** six operators are covered by three vector predicates per type and
+  an optional complement of the finished word; unsigned integers are compared
+  as signed after flipping the sign bit of both operands.
 - Floats use a total order — NaN equals NaN and is greater than everything —
   so that filters, sorts and group-bys agree with each other.
 - The kernels return the population count of what they wrote, so a filter
@@ -285,19 +296,24 @@ A filter is two kernels joined by a bitmask.
 
 ### 4.2 Compaction
 
-- **4- and 8-byte elements, dense words:** a table of `vpermd` index vectors,
-  one entry per mask byte (or nibble). Stores are whole vectors. The output
-  offset of every step of a 64-row word is derived from the word's population
-  counts before the first step runs, so there is no data-dependent branch and
-  no step waits for the previous one. The apron (L2) makes the last store
-  legal.
+- **Dense words, AVX-512:** `vpcompress` packs the selected lanes of a register
+  to its front — eight 64-bit, sixteen 32-bit, thirty-two 16-bit or sixty-four
+  8-bit lanes per step (the last two need VBMI2). The register is stored
+  whole: the form that writes only the selected lanes to memory is very slow
+  on some CPUs.
+- **Dense words, AVX2 (4- and 8-byte elements):** a table of `vpermd` index
+  vectors, one entry per mask byte (or nibble). Stores are whole vectors.
+- In both, the output offset of every step of a 64-row word is derived from
+  the word's population counts before the first step runs, so there is no
+  data-dependent branch and no step waits for the previous one. The apron
+  (L2) makes the last store legal.
 - **Sparse stretches:** the density of each group of 16 mask words picks a
   fixed number of scalar steps per word (4, 8 or 12): take the lowest set
   bit, copy that element, clear the bit. Steps beyond a word's population
   count copy a harmless element past the cursor, so this loop is branch-free
   too.
-- **1- and 2-byte elements:** table-driven `pshufb` steps; the cursor advances
-  by a population count.
+- **1- and 2-byte elements with AVX2:** table-driven `pshufb` steps; the cursor
+  advances by a population count.
 - **16-byte string views:** each mask bit is doubled and the pair goes through
   the 8-byte kernel.
 - **Bitmaps** (boolean values, validity) are compacted with `pext`.
@@ -342,11 +358,19 @@ the detected cache size (`DATAFRAMES_STREAM_BYTES` overrides it).
 ### 4.6 Sparse selections
 
 A single column switches to the scalar steps of 4.2. A frame does better:
-for every block in which at most two rows in five survive, the block's mask is
-turned into a list of row indices once, and each output column is gathered
-through the list — it touches only the rows it keeps instead of decoding the
-mask again. Large results are gathered through the same non-temporal staging
-buffer as 4.5.
+for every block in which at most two rows in five survive (one in eight with
+AVX-512, whose compression is cheaper), the block's mask is turned into a
+list of row indices once, and each output column is gathered through the
+list — it touches only the rows it keeps instead of decoding the mask again.
+Large results are gathered through the same non-temporal staging buffer as
+4.5.
+
+Whether the lists beat plain compaction once the data is no longer in the
+cache depends on the machine: with ten million rows and one row in ten kept
+they were a third slower on a Zen 5 and a third faster on an Emerald Rapids.
+A filter over at least 64 blocks therefore times two sparse blocks each way
+(lists, mask, mask, lists) and writes the rest the faster way; the output is
+the same either way.
 
 ### 4.7 Frames and expressions
 
@@ -373,30 +397,72 @@ buffer as 4.5.
 ### 4.8 Dispatch
 
 The crate is compiled for the baseline of its target. `kernels::level()`
-detects AVX2, BMI1/2, POPCNT, LZCNT and FMA once and caches the answer; kernel
-entry points branch on it. Loops that LLVM vectorises well by itself are
+detects the tier once — AVX-512 (F, BW, DQ, VL), else AVX2 (with BMI1/2,
+POPCNT, LZCNT, FMA), else portable code — and caches the answer; kernel entry
+points branch on it. Loops that LLVM vectorises well by itself are
 written once and re-instantiated inside a `#[target_feature]` wrapper
 (`simd_dispatch!`), so they too run with 256-bit vectors in a portable binary.
-`DATAFRAMES_SIMD=scalar` forces the portable kernels.
+`DATAFRAMES_SIMD=scalar` forces the portable kernels and `DATAFRAMES_SIMD=avx2`
+stops at AVX2.
 
 ### 4.9 Reductions and work splitting
 
-- Sums, means, minima and maxima are reduced piece by piece (16 384 rows per
-  piece) in a fixed association order: a floating-point sum is bit-identical
-  whatever the number of threads or the vector width.
-- Kernels use every hardware thread by default (`DATAFRAMES_THREADS`
-  restricts them, e.g. to one per physical core; on the benchmark runner the
-  second thread of a core never hurt and bought up to 30 % on multi-column
-  filters). The input is cut into a few chunks per thread, claimed
-  dynamically, so a slow or late thread does not hold the others up.
+- Sums, means, minima and maxima are reduced piece by piece (at most 16 384
+  rows per piece; a column of up to 64 pieces is cut into a power of two of
+  equal ones, so that two or four threads can share it evenly) in a fixed
+  association order that depends on the length of the column alone: a
+  floating-point sum is bit-identical whatever the number of threads or the
+  vector width.
 - **The team.** General-purpose pools put idle workers to sleep at once, and
   waking one costs tens of microseconds — longer than most operations on a
   column that fits in the cache, which is why such columns are normally
   processed by one core. `kernels::team` is a fork-join executor whose workers
   keep polling for 100 µs after a parallel region (`DATAFRAMES_SPIN_US`).
-  While they poll, starting a region costs about half a microsecond, so
-  inputs from 64 KiB upwards are split. When the workers are asleep, only
-  inputs of 256 KiB or more — or a burst of smaller calls — wake them.
+  While they poll, starting a region costs a few cache-line transfers. Every
+  participant has its own share of the task indices — the same part of the
+  input in every call of a given shape.
+- **Inputs far larger than a core's cache** are split over every hardware
+  thread (`DATAFRAMES_THREADS`), a few chunks per thread, and a thread that
+  is done takes over what the others have left. Sleeping workers are woken
+  for inputs of 256 KiB or more, or for a burst of smaller calls.
+- **Inputs that fit in a core's cache, or nearly** (up to four times the L2
+  size) are where a fixed rule fails. Measured on the runner CPUs with a
+  100 000-row column of 8-byte values: when each core already holds its part
+  — the column is read again and again, or was last written by the same
+  split — two cores take half the time of one (1.9 µs against 3.2 µs on a
+  Zen 5, 3.8 against 7.7 on a Zen 4, 4.7 against 8.9 on a Granite Rapids).
+  When the calling thread has just rewritten the column, every line has to
+  cross to the other core and back, at a tenth of the speed of a cache hit,
+  and the same split takes two to three times *longer* than no split (58 µs
+  against 19 µs on the Zen 4, rewrite included). So `par::plan` measures.
+  Per size class it keeps one decision, initially "one thread" for an input
+  that fits in L2 and "split" above. After 8 calls, and then at intervals
+  that quadruple up to 4096 calls while nothing changes, it times six calls
+  as they are and six the other way (after two untimed ones that move the
+  data), and changes its mind if the median kernel call took at least a ninth
+  less time *and* the caller's cycle from one call to the next did not get
+  longer. The second condition matters: a split can make the kernel faster by
+  taking the column away from the thread that writes it, whose writes then
+  pay. A settled workload spends fourteen calls in four thousand on trials; a
+  workload that changes character runs the wrong way for at most that long.
+  The decision is shared by all kernels of a size class, so that the one that
+  writes a column and the one that reads it agree on which core holds what.
+- **How a cache-resident input is split.** One thread per *physical* core, at
+  most four, with exactly one equal chunk each: two hardware threads of a
+  core share its cache and its path to it, and with one chunk per thread
+  nothing is taken over, so nothing changes cores. On Linux the first workers
+  — one for every physical core but the caller's — are each kept to the
+  hardware threads of one core (`DATAFRAMES_HOME_CORES=0` leaves it to the
+  scheduler): left alone, the scheduler quite often wakes a worker on the
+  second thread of the caller's own core, where it adds nothing — on the
+  runners that alone decided whether the split halved the time or changed
+  nothing. The calling thread is never restricted; when a job finds it on a
+  different core, the homes are rearranged around it (at most once a
+  millisecond). The remaining workers have no home, so that no core ever has
+  more threads tied to it than it can run at once — an earlier version that
+  gave every worker a home ran at half speed whenever the caller landed on a
+  core that two workers were tied to. Per-thread partial results live on
+  cache lines of their own.
   `rayon` is used for sorting only.
 
 ---
@@ -505,8 +571,10 @@ that makes it sound is *no view extends past `tail`, and `tail` only grows*.
   open *after* announcing itself; the caller closes the job and then waits for
   `active == 0` before it returns. In the sequentially consistent order of
   those four operations either the worker sees the job closed and stays out,
-  or the caller sees the worker and waits. Task indices are handed out by one
-  `fetch_add`, so each runs exactly once whichever threads take part.
+  or the caller sees the worker and waits. Task indices are dealt out in
+  per-participant shares, each with its own counter, and a claim is one
+  `fetch_add` on a share's counter, so every index runs exactly once whichever
+  threads take part.
 - Nested regions and regions started concurrently from several threads do not
   queue: they run on the calling thread.
 - A panic in a task cancels the tasks not yet claimed and is re-raised on the
@@ -552,7 +620,9 @@ check ownership once, then run a plain loop over `&mut [T]`.
 | snapshot isolation for shared mutation | readers never wait for a write; atomic multi-column writes | one writer at a time; a writer copies the columns it changes; fetching a new version takes a short mutex |
 | fixed association order for float reductions | bit-identical results across threads and CPUs | cannot use the fastest order on each machine |
 | run-time CPU dispatch | one portable binary | one predictable branch per kernel call |
-| workers poll for 100 µs after a parallel region | columns from 64 KiB use every core; a region starts in under a microsecond | a burst of idle CPU after each region |
+| workers poll for 100 µs after a parallel region | a parallel region starts in a fraction of a microsecond, which makes cache-sized columns worth splitting at all | a burst of idle CPU after each region |
+| the split of a cache-resident column is decided by measurement | half the time where each core keeps its part; no two- to three-fold loss where the caller rewrites the column | fourteen timed or trial calls in up to 4096; a changed workload runs the wrong way for up to 4096 calls; the first calls of a loop run on one thread |
+| one worker per other physical core has a home there (Linux) | a split with one helper per core spans distinct cores, none of them the caller's | such a worker cannot move off a core that another process is using; the policy then sees no gain and stops splitting |
 | no interior mutability in columns | `&column` is read-only to the optimiser; pointer and length stay in registers | a bitmap cannot cache a count lazily: it is computed when the bitmap is built, and large partial slices count on request |
 | frame filters block-wise over all columns | one pass, all cores, shared row-index lists | nullable and bit-packed columns take a column-wise path |
 
@@ -567,7 +637,9 @@ check ownership once, then run a plain loop over `&mut [T]`.
   uninitialised output capacity to a kernel.
 - **Model checking of kernels.** Every vector kernel is compared with a
   portable reference for every element type, every operator, lengths around
-  every block and word boundary, and mask densities from empty to full.
+  every block and word boundary, and mask densities from empty to full. On a
+  CPU with AVX-512 the same run also calls the AVX2 kernels directly, so both
+  vector tiers are covered wherever the tests land.
 - **Both dispatch paths in CI.** The test suite runs with run-time dispatch,
   with `-C target-cpu=native`, with `DATAFRAMES_SIMD=scalar`, and on aarch64.
 - **Whole-frame filters against a row-by-row model** at densities on both
@@ -600,9 +672,23 @@ check ownership once, then run a plain loop over `&mut [T]`.
 - **Interleaving.** `scripts/bench.py run --per-case` runs one case at a time
   across all libraries, for several rounds; the reported number is the best
   median over rounds.
-- **Verdicts.** More than 3 % faster than the fastest competitor is a win;
-  within 3 % is level; anything else is a loss and fails the workflow.
+- **Verdicts.** More than 5 % faster than the fastest competitor is a win;
+  within 5 % — about what identical code varies by between two processes on a
+  shared cloud machine — is level; more than 5 % slower is a loss and fails
+  the workflow. A win or a loss must also show in every round (each round is
+  a fresh process for every library): a best time that one process reached
+  and the next did not is noise, whichever library it flatters, and counts as
+  level. Some cases can only be level: a point look-up is a bounds check and
+  a load in every library.
+- **Several machines.** GitHub-hosted runners are not one CPU model: AMD Zen 3
+  (AVX2 only), Zen 4 and Zen 5, and Intel Ice Lake, Emerald Rapids and Granite
+  Rapids (all with AVX-512) have turned up, with L2 caches from 512 KiB to
+  2 MiB. The published block names the machine of the last run; the probe
+  workflow (`.github/workflows/probe.yml`) reruns the suite, the settings
+  comparison or the kernel timings on a chosen model.
 - **Defaults only.** dataframes is measured as it ships. Its polling workers
-  (4.9) are part of that: in a timing loop they are always awake. The tuning
-  workflow (`scripts/tune.py`) measures what each such default buys on the
-  runner, including with polling switched off.
+  and its learned split decision (4.9) are part of that: in a timing loop the
+  workers are always awake, and a loop that repeats one call on one column is
+  the case in which splitting a small column pays. The tuning workflow
+  (`scripts/tune.py`) measures what each such default buys on the runner,
+  including with polling switched off and with one thread.
