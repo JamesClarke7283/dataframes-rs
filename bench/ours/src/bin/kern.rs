@@ -260,6 +260,21 @@ fn main() {
         }
         pin_to(None);
     }
+    if want("pages") {
+        // Does it matter for a scan whether a column that fits in the cache
+        // lies in one huge page or in a few hundred small ones? A block of
+        // 2 MiB comes from the allocator's huge-page class; the first `rows`
+        // elements of it are the column.
+        let mut big: AlignedVec<i64> = dataframes::memory::zeroed_vec((2usize << 20) / 8);
+        big[..rows.min(big.len())].copy_from_slice(&a[..rows.min(big.len())]);
+        let huge = &big[..rows.min(big.len())];
+        for round in 0..2 {
+            report(&format!("mask i64, 1 thread, small pages ({round})"), rows, time(|| kernels::cmp_scalar_mask_with(&a, CmpOp::Lt, 500, 1)));
+            report(&format!("mask i64, 1 thread, one huge page ({round})"), rows, time(|| kernels::cmp_scalar_mask_with(huge, CmpOp::Lt, 500, 1)));
+            report(&format!("plain sum, 1 thread, small pages ({round})"), rows, time(|| sum_slice(&a)));
+            report(&format!("plain sum, 1 thread, one huge page ({round})"), rows, time(|| sum_slice(huge)));
+        }
+    }
     if want("filter") {
         // The way a column filters itself: a mask, then a compaction, each
         // asking the splitting policy on its own.
