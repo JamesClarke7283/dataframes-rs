@@ -126,9 +126,11 @@ pub(crate) struct EmitChoice {
     probes: AtomicU32,
     /// Timed blocks that have reported.
     reports: AtomicU32,
-    /// Nanoseconds and rows of the timed blocks: `[index lists, dense]`.
-    nanos: [AtomicU64; 2],
-    rows: [AtomicU64; 2],
+    /// The better of the two timed blocks each way, in nanoseconds per 65 536
+    /// rows: `[index lists, dense]`. The better one, not the sum: a block
+    /// that is the first to touch fresh output memory pays for the page
+    /// faults, whichever way it is written.
+    best: [AtomicU64; 2],
 }
 
 impl EmitChoice {
@@ -146,8 +148,7 @@ impl EmitChoice {
             state: AtomicU8::new(if compare { Self::COMPARING } else { Self::LISTS }),
             probes: AtomicU32::new(0),
             reports: AtomicU32::new(0),
-            nanos: [AtomicU64::new(0), AtomicU64::new(0)],
-            rows: [AtomicU64::new(0), AtomicU64::new(0)],
+            best: [AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX)],
         }
     }
 
@@ -158,15 +159,12 @@ impl EmitChoice {
     }
 
     fn report(&self, dense: bool, nanos: u64, rows: usize) {
-        let way = usize::from(dense);
-        self.nanos[way].fetch_add(nanos, Ordering::Relaxed);
-        self.rows[way].fetch_add(rows as u64, Ordering::Relaxed);
+        let per_block = (u128::from(nanos) << 16) / rows.max(1) as u128;
+        self.best[usize::from(dense)].fetch_min(per_block.min(u128::from(u64::MAX - 1)) as u64, Ordering::Relaxed);
         if self.reports.fetch_add(1, Ordering::AcqRel) + 1 == Self::PROBES {
-            let [lists, dense] = [0, 1].map(|w| {
-                (u128::from(self.nanos[w].load(Ordering::Relaxed)), u128::from(self.rows[w].load(Ordering::Relaxed)))
-            });
+            let [lists, dense] = [0, 1].map(|way| u128::from(self.best[way].load(Ordering::Relaxed)));
             // Dense only for a clear gain: an eighth less time per row.
-            let faster = dense.0 * lists.1 * 8 < lists.0 * dense.1 * 7;
+            let faster = dense * 8 < lists * 7;
             self.state.store(if faster { Self::DENSE } else { Self::LISTS }, Ordering::Relaxed);
         }
     }
@@ -284,7 +282,11 @@ mod tests {
             return;
         }
         // (nanoseconds of the two list blocks, of the two dense blocks) -> dense?
-        for (lists, dense, want) in [([100, 100], [60, 60], true), ([100, 100], [95, 95], false), ([60, 70], [100, 90], false)] {
+        // The better block of each way counts: the first block of all may
+        // have paid for the page faults of fresh output memory.
+        let cases =
+            [([100, 100], [60, 60], true), ([100, 100], [95, 95], false), ([60, 70], [100, 90], false), ([900, 100], [95, 95], false)];
+        for (lists, dense, want) in cases {
             let choice = EmitChoice::new(COMPARE_BLOCKS, 2);
             assert_eq!(choice.state.load(Ordering::Relaxed), EmitChoice::COMPARING);
             let order: Vec<Option<bool>> = (0..6).map(|_| choice.probe()).collect();
