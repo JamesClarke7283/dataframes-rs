@@ -123,7 +123,7 @@ fn duo(data: &mut [i64], split: usize, caller_cpu: Option<usize>, helper_cpu: Op
 }
 
 fn report(name: &str, rows: usize, ns: f64) {
-    let learned: Vec<String> = par::resident_decisions()
+    let learned: Vec<String> = par::learned_decisions()
         .iter()
         .map(|&(bytes, split, period, kernel, other)| {
             format!("{}K:{}/{period} {kernel}|{other}", bytes >> 10, if split { "split" } else { "one" })

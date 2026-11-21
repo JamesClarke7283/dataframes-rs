@@ -456,28 +456,50 @@ fn reduce_pieces<T: Num, R: Send>(
     // pieces in order, so it does not depend on who computed what.
     let pieces = n.div_ceil(piece);
     let run = par::chunk_rows(n, size_of::<T>(), tasks).div_ceil(piece).max(1);
-    let work = |chunk: usize, slots: &mut [std::mem::MaybeUninit<R>]| {
-        for (k, slot) in slots.iter_mut().enumerate() {
-            let start = (chunk * run + k) * piece;
-            slot.write(map(&values[start..(start + piece).min(n)]));
-        }
-    };
-    if pieces <= BALANCED_PIECES {
-        // Few pieces: their results fit on the stack.
-        let mut results = [const { std::mem::MaybeUninit::<R>::uninit() }; BALANCED_PIECES];
-        par::for_each_chunk_mut(&mut results[..pieces], run, tasks, work);
-        // SAFETY: each of the first `pieces` slots was written exactly once
-        // above; reading it out moves the value, and the array itself never
-        // drops its (uninitialised-typed) slots.
-        return results[..pieces].iter().map(|r| unsafe { r.assume_init_read() }).fold(init, fold);
+    let chunks = pieces.div_ceil(run);
+    if chunks <= OWN_TASKS && run <= OWN_PIECES {
+        // A few threads with a few pieces each: the case of a column that
+        // sits in the cache, where a hand-off of a cache line between cores
+        // costs as much as a tenth of the whole reduction. Every thread
+        // writes its results to lines that nobody else touches while it
+        // works.
+        let mut results = [const { OwnLines([const { std::mem::MaybeUninit::<R>::uninit() }; OWN_PIECES]) }; OWN_TASKS];
+        par::for_each_chunk_mut(&mut results[..chunks], 1, tasks, |chunk, own| {
+            for (k, slot) in own[0].0[..run].iter_mut().enumerate() {
+                let start = (chunk * run + k) * piece;
+                if start >= n {
+                    break;
+                }
+                slot.write(map(&values[start..(start + piece).min(n)]));
+            }
+        });
+        // SAFETY: piece `p` was written above, by chunk `p / run` at index
+        // `p % run`, exactly once; reading it out moves the value, and the
+        // array never drops its slots.
+        return (0..pieces).map(|p| unsafe { results[p / run].0[p % run].assume_init_read() }).fold(init, fold);
     }
     let mut results: Vec<std::mem::MaybeUninit<R>> = Vec::with_capacity(pieces);
     // SAFETY: `MaybeUninit` needs no initialisation.
     unsafe { results.set_len(pieces) };
-    par::for_each_chunk_mut(&mut results, run, tasks, work);
+    par::for_each_chunk_mut(&mut results, run, tasks, |chunk, slots| {
+        for (k, slot) in slots.iter_mut().enumerate() {
+            let start = (chunk * run + k) * piece;
+            slot.write(map(&values[start..(start + piece).min(n)]));
+        }
+    });
     // SAFETY: every slot was written exactly once above.
     results.into_iter().map(|r| unsafe { r.assume_init() }).fold(init, fold)
 }
+
+/// Most threads, and most pieces per thread, whose results are kept on the
+/// stack in [`OwnLines`].
+const OWN_TASKS: usize = 4;
+const OWN_PIECES: usize = 32;
+
+/// The per-piece results of one thread, on cache lines of their own (two,
+/// because of the adjacent-line prefetcher).
+#[repr(align(128))]
+struct OwnLines<R>([std::mem::MaybeUninit<R>; OWN_PIECES]);
 
 /// One serial, vectorised pass over `values`: the yardstick the work-splitting
 /// policy times to learn how fast a core of this machine streams.

@@ -7,7 +7,7 @@
 //! what is left of the others' shares, so a helper that arrives late or is
 //! descheduled does not hold the rest up.
 //!
-//! # Inputs larger than a core's cache
+//! # Inputs far larger than a core's cache
 //!
 //! They are split over every hardware thread, a few chunks each: while team
 //! workers are polling ("hot") always, and when they are asleep if the input
@@ -15,42 +15,45 @@
 //! arrive in a burst, in which case the second call of the burst wakes the
 //! team for the rest.
 //!
-//! # Inputs that fit in a core's cache
+//! # Inputs that fit in a core's cache, or nearly
 //!
 //! Below two chunks of [`min_task_bytes`] (32 KiB each), or below what one
 //! core streams through in a microsecond ([`stream_rate`], measured once),
 //! an input is never split.
 //!
-//! Above that and up to the size of the private (L2) cache, where the data
-//! *is* decides, and no rule can know that. Measured on six server CPUs: if
-//! each core already holds its part of a column — because the column is read
-//! again and again, or was last written by the same split — two cores finish
-//! in half the time of one (a 100 000-row sum: 1.9 µs instead of 3.2 µs on a
-//! Zen 5, 3.8 instead of 7.7 on a Zen 4). If the calling thread has just
-//! written the column, the second core must pull every cache line across,
-//! at a tenth of the speed, and the same split takes two to three times
-//! *longer* than no split.
+//! Above that and up to a few times the private (L2) cache, where the data
+//! *is* decides, and no rule on sizes can know that. Measured on the CPUs of
+//! the benchmark runners: if each core already holds its part of a column —
+//! because the column is read again and again, or was last written by the
+//! same split — two cores finish in half the time of one (a 100 000-row sum:
+//! 1.9 µs instead of 3.2 µs on a Zen 5, 3.8 instead of 7.7 on a Zen 4). If
+//! the calling thread has just written the column, the second core must pull
+//! every cache line across, at a tenth of the speed, and the calling thread
+//! must get them back before it can write again: the same split then takes
+//! two to three times *longer* than no split.
 //!
 //! So the policy measures instead of guessing. For each size class it keeps
-//! one decision — split or not — which starts as "not". Every so often it
-//! times six calls as they are, runs the next eight the other way (two to
-//! move the data, six timed; see [`Plan`]), and changes its mind if the
-//! kernel took at least a ninth less time that way *and* the caller's whole
-//! cycle, from one call to the next, did not get longer — a split that makes
-//! the kernel faster by making the caller's own writes slower is no gain. A
-//! trial that changes nothing makes the next one wait four times as long, so
-//! a workload that is settled pays next to nothing, and one that changes
-//! character is followed. The decision is shared by all kernels, so that one
-//! writing a column and one reading it agree on which core holds what.
+//! one decision — split or not. It starts as "not" for an input that fits in
+//! the private cache (it may well be there) and as "split" for a larger one.
+//! Every so often the policy times six calls as they are, runs the next
+//! eight the other way (two to move the data, six timed; see [`Plan`]), and
+//! changes its mind if the typical kernel call took at least a ninth less
+//! time that way *and* the caller's whole cycle, from one call to the next,
+//! did not get longer — a split that makes the kernel faster by making the
+//! caller's own writes slower is no gain. A trial that changes nothing makes
+//! the next one wait four times as long, up to 4096 calls, so a workload
+//! that is settled pays next to nothing, and one that changes character is
+//! followed. The decision is shared by all kernels, so that one writing a
+//! column and one reading it agree on which core holds what.
 //!
-//! A split of a cache-resident input uses one thread per *physical* core
-//! (two threads of one core share its cache and the path to it), at most
-//! [`RESIDENT_PARTS`], with one equal chunk each: nothing is left to be taken
-//! over, so nothing changes cores.
+//! A split of an input that fits in the private cache uses one thread per
+//! *physical* core (two threads of one core share its cache and the path to
+//! it), at most [`RESIDENT_PARTS`], with one equal chunk each: nothing is
+//! left to be taken over, so nothing changes cores.
 
 use std::mem::MaybeUninit;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use super::{aggregate, cache, team};
@@ -220,33 +223,51 @@ const WARMING: u8 = 2;
 /// Calls run the other way: [`TRIAL_SKIP`] untimed, then [`WINDOW`] timed.
 const TRIAL: u8 = 3;
 
-/// What the policy knows about cache-resident inputs of one size class.
+/// [`Lane::decision`]: not made yet.
+const UNSET: u8 = 0;
+/// [`Lane::decision`]: one thread.
+const ALONE: u8 = 1;
+/// [`Lane::decision`]: split.
+const SPLIT: u8 = 2;
+
+/// What the policy knows about inputs of one size class that fit in a
+/// core's cache, or nearly.
 ///
 /// Plain atomics, read and written without coordination: the fields are
 /// statistics and a decision that is re-examined all the time, and callers
 /// on several threads at worst lose an update. (Only one of them can have
 /// the team anyway.) Times are nanoseconds.
-#[repr(align(64))]
+#[repr(align(128))]
 struct Lane {
     /// Calls since the last decision.
     calls: AtomicU32,
     /// Calls between a decision and the next trial.
     period: AtomicU32,
-    /// The decision: whether inputs of this class are split.
-    split: AtomicBool,
+    /// [`UNSET`], [`ALONE`] or [`SPLIT`].
+    decision: AtomicU8,
     /// [`STEADY`], [`BASELINE`], [`WARMING`] or [`TRIAL`].
     phase: AtomicU8,
     /// Calls left in the phase.
     left: AtomicU8,
-    /// Shortest kernel call of the baseline window (`[0]`, under the
-    /// decision) and of the trial (`[1]`, the other way).
-    kernel: [AtomicU32; 2],
-    /// Shortest time from the start of one call to the start of the next, in
-    /// the same two windows: the kernel plus whatever the caller does in
+    /// How long the kernel calls of the baseline window took (`[0]`, under
+    /// the decision) and those of the trial (`[1]`, the other way).
+    kernel: [[AtomicU32; WINDOW as usize]; 2],
+    /// The time from the start of one call to the start of the next, in the
+    /// same two windows: the kernel plus whatever the caller does in
     /// between, which is where a split can cost what it saved.
-    cycle: [AtomicU32; 2],
+    cycle: [[AtomicU32; WINDOW as usize]; 2],
     /// When the previous call of the window started; 0 at its beginning.
     last_start: AtomicU64,
+}
+
+/// What a call asks of its lane.
+#[derive(Clone, Copy)]
+struct Request {
+    /// Threads a split would use.
+    parts: usize,
+    /// Whether the input fits in one core's cache (else: nearly).
+    resident: bool,
+    bytes: usize,
 }
 
 impl Lane {
@@ -254,21 +275,31 @@ impl Lane {
         Self {
             calls: AtomicU32::new(0),
             period: AtomicU32::new(FIRST_TRIAL),
-            split: AtomicBool::new(false),
+            decision: AtomicU8::new(UNSET),
             phase: AtomicU8::new(STEADY),
             left: AtomicU8::new(0),
-            kernel: [AtomicU32::new(UNKNOWN), AtomicU32::new(UNKNOWN)],
-            cycle: [AtomicU32::new(UNKNOWN), AtomicU32::new(UNKNOWN)],
+            kernel: [const { [const { AtomicU32::new(UNKNOWN) }; WINDOW as usize] }; 2],
+            cycle: [const { [const { AtomicU32::new(UNKNOWN) }; WINDOW as usize] }; 2],
             last_start: AtomicU64::new(0),
         }
     }
 
-    /// Decide about one call that could use `parts` threads.
-    fn plan(&'static self, parts: usize) -> Plan {
+    /// Decide about one call.
+    fn plan(&'static self, request: Request) -> Plan {
         const R: Ordering = Ordering::Relaxed;
+        let Request { parts, resident, bytes } = request;
         let calls = self.calls.load(R).wrapping_add(1);
         self.calls.store(calls, R);
-        let mut split = self.split.load(R);
+        let mut split = match self.decision.load(R) {
+            UNSET => {
+                // Until something has been measured: an input that is in the
+                // calling core's cache stays there; one that is not is as
+                // near to every other core.
+                self.decision.store(if resident { ALONE } else { SPLIT }, R);
+                !resident
+            }
+            decision => decision == SPLIT,
+        };
         let (mut phase, mut left) = (self.phase.load(R), self.left.load(R));
 
         // Phase changes. The windows on both sides of a trial are adjacent
@@ -276,8 +307,8 @@ impl Lane {
         // after the previous one has reported, hence "left == 0" is checked
         // on the call *after* a window.
         if phase == STEADY && calls >= self.period.load(R) {
-            for best in self.kernel.iter().chain(&self.cycle) {
-                best.store(UNKNOWN, R);
+            for sample in self.kernel.iter().chain(&self.cycle).flatten() {
+                sample.store(UNKNOWN, R);
             }
             self.last_start.store(0, R);
             (phase, left) = (BASELINE, WINDOW);
@@ -304,7 +335,7 @@ impl Lane {
             let better = self.other_way_is_better();
             if better {
                 split = !split;
-                self.split.store(split, R);
+                self.decision.store(if split { SPLIT } else { ALONE }, R);
             }
             self.settle(better);
             phase = STEADY;
@@ -330,6 +361,11 @@ impl Lane {
             1
         } else if team::helpers_awake(parts - 1) {
             parts
+        } else if !resident {
+            // An input this large is worth a wake-up, as it is beyond the
+            // cache-resident sizes.
+            let hot = 1 + team::hot_helpers();
+            if worth_waking(bytes) { parts } else { hot.min(parts) }
         } else {
             // The class splits, but the team went to sleep since: this call
             // runs alone, and if more are coming the team is woken for them.
@@ -347,24 +383,24 @@ impl Lane {
         let start = now_nanos().max(1);
         let previous = self.last_start.swap(start, R);
         let timed = timed && (tasks > 1) == want_split;
+        let slot = usize::from(left).min(WINDOW as usize - 1);
         if timed && previous != 0 {
-            lower(&self.cycle[usize::from(trial)], start.saturating_sub(previous));
+            self.cycle[usize::from(trial)][slot].store(clamp_nanos(start.saturating_sub(previous)), R);
         }
-        Plan { tasks, sample: timed.then_some(Sample { lane: self, trial, start }) }
+        Plan { tasks, sample: timed.then_some(Sample { lane: self, trial, slot, start }) }
     }
 
     /// The verdict of a trial.
     fn other_way_is_better(&self) -> bool {
-        const R: Ordering = Ordering::Relaxed;
-        let [kernel, other_kernel] = [0, 1].map(|i| u64::from(self.kernel[i].load(R)));
-        let [cycle, other_cycle] = [0, 1].map(|i| u64::from(self.cycle[i].load(R)));
-        let unknown = u64::from(UNKNOWN);
-        if kernel == unknown || other_kernel == unknown {
+        let [Some(kernel), Some(other_kernel)] = [0, 1].map(|i| median(&self.kernel[i])) else {
             return false;
-        }
+        };
         // A clear gain: a ninth less time in the kernel.
         let kernel_faster = other_kernel * 9 < kernel * 8;
-        if cycle == unknown || other_cycle == unknown || cycle >= 16 * kernel {
+        let [Some(cycle), Some(other_cycle)] = [0, 1].map(|i| median(&self.cycle[i])) else {
+            return kernel_faster;
+        };
+        if cycle >= 16 * kernel {
             // The caller does so much between two calls that its cycle says
             // nothing about the kernel.
             return kernel_faster;
@@ -388,48 +424,69 @@ impl Lane {
     }
 }
 
-/// `best = min(best, nanos)`.
-fn lower(best: &AtomicU32, nanos: u64) {
-    let nanos = nanos.min(u64::from(UNKNOWN - 1)) as u32;
-    if nanos < best.load(Ordering::Relaxed) {
-        best.store(nanos, Ordering::Relaxed);
-    }
+fn clamp_nanos(nanos: u64) -> u32 {
+    nanos.min(u64::from(UNKNOWN - 1)) as u32
 }
 
-/// One lane per power of two of input size, 64 KiB to 8 MiB and beyond.
+/// The typical value of a window: the median of what was measured, if at
+/// least half of the window was. (The best value would favour a split, whose
+/// best case is good and whose hand-off sometimes is not.)
+fn median(window: &[AtomicU32; WINDOW as usize]) -> Option<u64> {
+    let mut known = [0u32; WINDOW as usize];
+    let mut n = 0;
+    for sample in window {
+        let v = sample.load(Ordering::Relaxed);
+        if v != UNKNOWN {
+            known[n] = v;
+            n += 1;
+        }
+    }
+    if n < WINDOW as usize / 2 {
+        return None;
+    }
+    known[..n].sort_unstable();
+    Some(u64::from(known[n / 2]))
+}
+
+/// One lane per power of two of input size, 64 KiB to 8 MiB.
 static LANES: [Lane; 8] = [const { Lane::new() }; 8];
 
 fn lane_for(bytes: usize) -> &'static Lane {
     &LANES[(bytes.max(1).ilog2() as usize).clamp(16, 23) - 16]
 }
 
-/// What the policy currently does with inputs that fit in a core's cache:
-/// for every size class that has been used, the smallest input size of the
-/// class in bytes, whether such inputs are split, how many calls lie between
-/// two trials of the alternative, and the shortest kernel call (nanoseconds,
-/// `u32::MAX` if unknown) of the last trial under the decision and the other
-/// way. For diagnostics and tuning.
-pub fn resident_decisions() -> Vec<(usize, bool, u32, u32, u32)> {
+/// What the policy currently does with inputs that fit in a core's cache or
+/// nearly: for every size class that has been used, the smallest input size
+/// of the class in bytes, whether such inputs are split, how many calls lie
+/// between two trials of the alternative, and the typical kernel call
+/// (nanoseconds, 0 if unknown) of the last trial under the decision and the
+/// other way. For diagnostics and tuning.
+pub fn learned_decisions() -> Vec<(usize, bool, u32, u32, u32)> {
     const R: Ordering = Ordering::Relaxed;
+    let typical = |window| median(window).unwrap_or(0) as u32;
     LANES
         .iter()
         .enumerate()
-        .filter(|(_, lane)| lane.calls.load(R) != 0 || lane.period.load(R) != FIRST_TRIAL)
-        .map(|(i, lane)| (1usize << (16 + i), lane.split.load(R), lane.period.load(R), lane.kernel[0].load(R), lane.kernel[1].load(R)))
+        .filter(|(_, lane)| lane.decision.load(R) != UNSET)
+        .map(|(i, lane)| {
+            (1usize << (16 + i), lane.decision.load(R) == SPLIT, lane.period.load(R), typical(&lane.kernel[0]), typical(&lane.kernel[1]))
+        })
         .collect()
 }
 
 struct Sample {
     lane: &'static Lane,
     trial: bool,
+    slot: usize,
     start: u64,
 }
 
 /// How one kernel call is split, from [`plan`].
 ///
 /// Keep it alive until the work is done: for inputs that fit in a core's
-/// cache some calls are timed, from the creation of the plan to its drop,
-/// and the policy learns from the result (see the [module documentation](self)).
+/// cache, or nearly, some calls are timed, from the creation of the plan to
+/// its drop, and the policy learns from the result (see the
+/// [module documentation](self)).
 #[must_use = "a plan times the work it was made for: keep it until the work is done"]
 pub struct Plan {
     tasks: usize,
@@ -453,10 +510,17 @@ impl Drop for Plan {
     #[inline]
     fn drop(&mut self) {
         if let Some(sample) = self.sample.take() {
-            lower(&sample.lane.kernel[usize::from(sample.trial)], now_nanos().saturating_sub(sample.start));
+            let nanos = clamp_nanos(now_nanos().saturating_sub(sample.start));
+            sample.lane.kernel[usize::from(sample.trial)][sample.slot].store(nanos, Ordering::Relaxed);
         }
     }
 }
+
+/// How far beyond the private cache the policy still asks where the data is:
+/// an input of up to this many times its size is small enough for the part
+/// that a core has just written, and that others would have to fetch from
+/// it, to matter.
+const NEAR_CACHE: usize = 4;
 
 /// How to split a kernel call over `rows` rows of `row_bytes` bytes of input
 /// each. See the [module documentation](self) for the policy.
@@ -467,19 +531,20 @@ pub fn plan(rows: usize, row_bytes: usize) -> Plan {
     if by_size <= 1 {
         return Plan::fixed(1);
     }
-    if bytes > cache::cache_info().l2 {
+    let l2 = cache::cache_info().l2;
+    if bytes > l2.saturating_mul(NEAR_CACHE) {
         return Plan::fixed(tasks_beyond_cache(bytes, by_size));
     }
-    resident_plan(bytes, by_size)
+    learned_plan(bytes, by_size, bytes <= l2)
 }
 
-/// [`plan`] for an input that fits in the calling core's cache.
-fn resident_plan(bytes: usize, by_size: usize) -> Plan {
-    let parts = by_size.min(RESIDENT_PARTS).min(team::cores());
+/// [`plan`] for an input that fits in the calling core's cache, or nearly.
+fn learned_plan(bytes: usize, by_size: usize, resident: bool) -> Plan {
+    let parts = if resident { by_size.min(RESIDENT_PARTS).min(team::cores()) } else { by_size.min(threads()) };
     if parts <= 1 || bytes < stream_rate() * (MIN_SPLIT_NANOS / 1000) {
         return Plan::fixed(1);
     }
-    lane_for(bytes).plan(parts)
+    lane_for(bytes).plan(Request { parts, resident, bytes })
 }
 
 /// Rows per chunk when `rows` rows are processed by `threads` threads: a
@@ -630,8 +695,12 @@ mod tests {
     fn lane_with(kernel: [u32; 2], cycle: [u32; 2]) -> Lane {
         let lane = Lane::new();
         for i in 0..2 {
-            lane.kernel[i].store(kernel[i], Ordering::Relaxed);
-            lane.cycle[i].store(cycle[i], Ordering::Relaxed);
+            for slot in 0..WINDOW as usize {
+                // One outlier per window: an interrupt must not decide.
+                let spike = if slot == 2 && kernel[i] != UNKNOWN { 50_000 } else { 0 };
+                lane.kernel[i][slot].store(kernel[i].saturating_add(spike), Ordering::Relaxed);
+                lane.cycle[i][slot].store(cycle[i], Ordering::Relaxed);
+            }
         }
         lane
     }
@@ -670,25 +739,40 @@ mod tests {
     #[test]
     fn a_lane_starts_alone_and_times_a_window_before_it_tries_anything() {
         let lane: &'static Lane = Box::leak(Box::new(Lane::new()));
+        let request = Request { parts: 2, resident: true, bytes: 512 << 10 };
         for call in 1..FIRST_TRIAL {
-            let plan = lane.plan(2);
+            let plan = lane.plan(request);
             assert!(plan.tasks() == 1 && plan.sample.is_none(), "call {call}");
         }
         for call in 0..WINDOW {
-            let plan = lane.plan(2);
+            let plan = lane.plan(request);
             assert_eq!(plan.tasks(), 1, "baseline call {call}");
             assert!(plan.sample.as_ref().is_some_and(|s| !s.trial), "baseline call {call}");
         }
-        assert_ne!(lane.kernel[0].load(Ordering::Relaxed), UNKNOWN);
-        assert_ne!(lane.cycle[0].load(Ordering::Relaxed), UNKNOWN);
+        assert!(median(&lane.kernel[0]).is_some());
+        assert!(median(&lane.cycle[0]).is_some());
         // Whatever the team does from here on, the lane keeps answering and
         // comes back to a decision.
         for _ in 0..20_000 {
-            let plan = lane.plan(2);
+            let plan = lane.plan(request);
             assert!((1..=2).contains(&plan.tasks()));
         }
         assert!(lane.period.load(Ordering::Relaxed) > FIRST_TRIAL);
         assert!(lane.period.load(Ordering::Relaxed) <= MAX_TRIAL_PERIOD);
+
+        // An input that is not in the caller's cache starts out split.
+        let lane: &'static Lane = Box::leak(Box::new(Lane::new()));
+        let _ = lane.plan(Request { parts: 2, resident: false, bytes: 4 << 20 });
+        assert_eq!(lane.decision.load(Ordering::Relaxed), SPLIT);
+    }
+
+    #[test]
+    fn the_typical_call_of_a_window_is_its_median() {
+        let window = |values: [u32; WINDOW as usize]| values.map(AtomicU32::new);
+        assert_eq!(median(&window([UNKNOWN; WINDOW as usize])), None);
+        assert_eq!(median(&window([5, 7, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN])), None);
+        assert_eq!(median(&window([5, 7, 6, UNKNOWN, UNKNOWN, UNKNOWN])), Some(6));
+        assert_eq!(median(&window([9, 1, 8, 2, 7, 900_000])), Some(8));
     }
 
     #[test]
