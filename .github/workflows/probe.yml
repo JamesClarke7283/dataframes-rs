@@ -1,0 +1,92 @@
+name: Probe
+
+# The comparison suite on a particular kind of runner, without publishing
+# anything. GitHub-hosted runners are not all the same CPU; this workflow
+# exits at once unless the machine it lands on matches the requested model,
+# so several can be started to catch a rare one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cpu:
+        description: Substring the CPU model name must contain (empty for any)
+        default: "Xeon"
+      rows:
+        description: Row counts, comma separated
+        default: "100000,1000000,10000000"
+      rounds:
+        description: Rounds per library and case
+        default: "2"
+      libs:
+        description: Libraries to run
+        default: "ours,polars,arrow,python"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.100.0"
+  CARGO_TARGET_DIR: target/native
+  RUSTFLAGS: "-C target-cpu=native"
+
+jobs:
+  probe:
+    name: comparison on a chosen CPU
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check the machine
+        id: machine
+        env:
+          WANT: ${{ inputs.cpu }}
+        run: |
+          model=$(lscpu | sed -n 's/^Model name: *//p' | head -1)
+          echo "CPU: $model"
+          lscpu | grep -E "^CPU\(s\)|Thread|Core|L1d|L2|L3"
+          lscpu | grep -q avx512f && echo "AVX-512: yes" || echo "AVX-512: no"
+          echo "transparent huge pages: $(cat /sys/kernel/mm/transparent_hugepage/enabled)"
+          if [ -z "$WANT" ] || echo "$model" | grep -qi -- "$WANT"; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "match=false" >> "$GITHUB_OUTPUT"
+            echo "### Not the requested CPU ($model); nothing was run." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.machine.outputs.match == 'true'
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        if: steps.machine.outputs.match == 'true'
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: actions/setup-python@v7
+        if: steps.machine.outputs.match == 'true' && contains(inputs.libs, 'python')
+        with:
+          python-version: "3.13"
+      - name: Install pandas and the Polars wheel
+        if: steps.machine.outputs.match == 'true' && contains(inputs.libs, 'python')
+        run: python -m pip install -r bench/python/requirements.txt
+      - name: Build the drivers
+        if: steps.machine.outputs.match == 'true'
+        run: cargo build --release --locked -p bench-ours -p bench-polars -p bench-arrow -p bench-common
+      - name: Unit tests on this CPU
+        if: steps.machine.outputs.match == 'true'
+        run: cargo test --release --lib
+      - name: Run
+        if: steps.machine.outputs.match == 'true'
+        env:
+          ROWS: ${{ inputs.rows }}
+          ROUNDS: ${{ inputs.rounds }}
+          LIBS: ${{ inputs.libs }}
+        run: python3 scripts/bench.py run --per-case --rows "$ROWS" --rounds "$ROUNDS" --time-ms 200 --libs "$LIBS" --out probe/raw.jsonl
+      - name: Report
+        if: steps.machine.outputs.match == 'true'
+        run: |
+          python3 scripts/bench.py report --input probe/raw.jsonl --out-dir probe --name probe > probe/report.md 2> probe/verdicts.txt || true
+          cat probe/report.md >> "$GITHUB_STEP_SUMMARY"
+          cat probe/verdicts.txt
+      - uses: actions/upload-artifact@v7
+        if: steps.machine.outputs.match == 'true'
+        with:
+          name: probe-results
+          path: probe/
