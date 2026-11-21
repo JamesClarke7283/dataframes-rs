@@ -131,7 +131,7 @@ A filter is two kernels joined by a bitmask: *compare* turns 64 rows into one ma
 - **Non-temporal stores for results larger than the cache** — skipping the read-for-ownership of every output line removes a third of the memory traffic of a 50 % filter.
 - **Frames share row-index lists** — a frame is filtered block by block over all its columns; a block keeping at most two rows in five turns its mask into a list of row indices once, and every column is gathered through it.
 - **Small columns go parallel too** — the kernels run on a fork-join team whose workers keep polling for 100 µs after a parallel region, so the next region starts in about half a microsecond and columns from 64 KiB upwards use every core.
-- **Predicates on frames are compiled** — `a < 5 & b > 2.0` becomes a tree of block kernels and is fused with the compaction of every output column; `filter(...).select([sum])` reduces the selected rows without materialising them.
+- **Predicates on frames are compiled** — `a < 5 & b > 2.0` becomes a tree of block kernels and is fused with the compaction of every output column; `filter(...).select([sum])` adds every row under a lane mask, so the selected rows are never materialised or even compacted.
 - **Run-time dispatch** — the crate compiles for the baseline of its target and selects the AVX2 kernels at run time, once. `DATAFRAMES_SIMD=scalar` forces the portable kernels, which are also the reference the vector kernels are tested against.
 
 ## Smart pointers for zero-overhead slicing

@@ -77,9 +77,9 @@ to, as they do in Polars.)
 | `datatypes` | `mod.rs`, `any_value.rs`, `small_str.rs` | the logical vocabulary | storage |
 | `chunked_array` | `mod.rs`, `ops.rs`, `boolean.rs`, `string.rs` | typed columns: values + validity, and the typed operations on them | other columns |
 | `series` | `mod.rs`, `arithmetic.rs`, `comparison.rs`, `pandas.rs` | run-time typing and dispatch | frames |
-| `frame` | `mod.rs`, `filter.rs`, `sort.rs`, `group_by.rs`, `join.rs`, `display.rs`, `pandas.rs` | equal-length column sets, block-wise multi-column filtering, relational operations | query plans, threads |
+| `frame` | `mod.rs`, `filter.rs`, `sort.rs`, `group_by.rs`, `join.rs`, `display.rs`, `pandas.rs` | equal-length column sets, block-wise multi-column filtering, relational operations | query plans |
 | `lazy` | `dsl.rs`, `eval.rs`, `exec.rs`, `frame.rs`, `query.rs` | expressions, plans, fused execution | — |
-| `sync` | `mod.rs` | versions, snapshots, writer serialisation | kernels |
+| `sync` | `mod.rs` | versions, snapshots, writer serialisation | how columns are stored |
 
 Two consequences of the layering are worth stating:
 
@@ -296,7 +296,8 @@ A filter is two kernels joined by a bitmask.
   bit, copy that element, clear the bit. Steps beyond a word's population
   count copy a harmless element past the cursor, so this loop is branch-free
   too.
-- **1- and 2-byte elements:** the same scheme with `pshufb`.
+- **1- and 2-byte elements:** table-driven `pshufb` steps; the cursor advances
+  by a population count.
 - **16-byte string views:** each mask bit is doubled and the pair goes through
   the 8-byte kernel.
 - **Bitmaps** (boolean values, validity) are compacted with `pext`.
@@ -360,9 +361,12 @@ buffer as 4.5.
   compiled into a small tree whose leaves are block kernels. The executor
   evaluates the tree for a block and immediately compacts that block of every
   output column through the ordered-commit pipeline.
-- `filter(p).select([aggregates])` evaluates the predicate for a block,
-  compacts the aggregated column into an L1-resident scratch buffer and
-  reduces it there. The filtered rows are never materialised.
+- `filter(p).select([aggregates])` never materialises the filtered rows. The
+  predicate is evaluated for a block; a sum then adds *every* row of the
+  block, four at a time under a lane mask looked up from their mask bits, so
+  rows that are not selected count as zero — one pass, no branch, no
+  compaction. Minima and maxima compact the block into an L1-resident scratch
+  buffer and reduce that.
 - Projection pushdown ensures that only columns that reach the output are
   compacted.
 
