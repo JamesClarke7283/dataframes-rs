@@ -66,9 +66,15 @@ fn detect() -> CacheInfo {
 const UNSET: usize = usize::MAX;
 static STREAM_THRESHOLD: AtomicUsize = AtomicUsize::new(UNSET);
 
+/// Upper bound of the default threshold. A server CPU reports a last-level
+/// cache of hundreds of megabytes, but it is shared by dozens of cores (and,
+/// in a virtual machine, by other tenants): a result of tens of megabytes
+/// does not stay in it.
+const MAX_DEFAULT_THRESHOLD: usize = 32 << 20;
+
 /// Outputs of at least this many bytes are written with non-temporal stores.
 ///
-/// Defaults to the size of the last-level cache; override with
+/// Defaults to the size of the last-level cache, at most 32 MiB; override with
 /// [`set_stream_threshold`] or the `DATAFRAMES_STREAM_BYTES` environment
 /// variable (`0` streams everything, a huge value disables streaming).
 #[inline]
@@ -84,7 +90,7 @@ fn init_stream_threshold() -> usize {
     let t = std::env::var("DATAFRAMES_STREAM_BYTES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or_else(|| cache_info().l3)
+        .unwrap_or_else(|| cache_info().l3.min(MAX_DEFAULT_THRESHOLD))
         .min(UNSET - 1);
     STREAM_THRESHOLD.store(t, Ordering::Relaxed);
     t
