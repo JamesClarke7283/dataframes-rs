@@ -61,37 +61,17 @@ pub fn set_min_task_bytes(bytes: usize) {
     MIN_TASK_BYTES.store(bytes.max(1), Ordering::Relaxed);
 }
 
-/// Threads kernels may use, the calling thread included (one per logical CPU
-/// by default, `DATAFRAMES_THREADS` overrides).
-#[inline]
-pub fn threads() -> usize {
-    team::threads()
-}
-
 /// Threads a kernel spreads its input over, the calling thread included.
 ///
 /// Every hardware thread by default. Whether the second thread of a core
 /// helps a memory-bound kernel depends on the machine; measured on the
 /// benchmark runner (2 cores, 4 threads) it never hurt and bought up to 30 %
-/// on multi-column filters. The `DATAFRAMES_MEMORY_THREADS` environment
-/// variable overrides the count (at most [`threads`]), for instance to keep
-/// to one thread per physical core.
+/// on multi-column filters. The `DATAFRAMES_THREADS` environment variable
+/// overrides the count, for instance to keep to one thread per physical core;
+/// `1` disables intra-column parallelism.
 #[inline]
-pub fn memory_threads() -> usize {
-    static CACHED: AtomicUsize = AtomicUsize::new(0);
-    match CACHED.load(Ordering::Relaxed) {
-        0 => {
-            let n = std::env::var("DATAFRAMES_MEMORY_THREADS")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .filter(|&n| n >= 1)
-                .unwrap_or_else(threads)
-                .clamp(1, threads());
-            CACHED.store(n, Ordering::Relaxed);
-            n
-        }
-        n => n,
-    }
+pub fn threads() -> usize {
+    team::threads()
 }
 
 /// Nanoseconds since the first call, for burst detection.
@@ -123,7 +103,7 @@ pub fn tasks_for(rows: usize, row_bytes: usize) -> usize {
     if by_size <= 1 {
         return 1;
     }
-    let limit = by_size.min(memory_threads());
+    let limit = by_size.min(threads());
     if limit <= 1 {
         return 1;
     }

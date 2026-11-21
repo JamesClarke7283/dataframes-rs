@@ -380,7 +380,7 @@ written once and re-instantiated inside a `#[target_feature]` wrapper
 - Sums, means, minima and maxima are reduced piece by piece (16 384 rows per
   piece) in a fixed association order: a floating-point sum is bit-identical
   whatever the number of threads or the vector width.
-- Kernels use every hardware thread by default (`DATAFRAMES_MEMORY_THREADS`
+- Kernels use every hardware thread by default (`DATAFRAMES_THREADS`
   restricts them, e.g. to one per physical core; on the benchmark runner the
   second thread of a core never hurt and bought up to 30 % on multi-column
   filters). The input is cut into a few chunks per thread, claimed
@@ -393,8 +393,7 @@ written once and re-instantiated inside a `#[target_feature]` wrapper
   While they poll, starting a region costs about half a microsecond, so
   inputs from 64 KiB upwards are split. When the workers are asleep, only
   inputs of 256 KiB or more — or a burst of smaller calls — wake them.
-  `DATAFRAMES_THREADS` caps the thread count; `rayon` is used for sorting
-  only.
+  `rayon` is used for sorting only.
 
 ---
 

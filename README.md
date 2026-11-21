@@ -61,6 +61,7 @@ fn main() -> PolarsResult<()> {
 - [Balancing retrieval speed against safe concurrency and ownership](#balancing-retrieval-speed-against-safe-concurrency-and-ownership)
 - [The API: Polars and pandas](#the-api-polars-and-pandas)
 - [Benchmarks](#benchmarks)
+- [Run-time settings](#run-time-settings)
 - [Status and limits](#status-and-limits)
 
 ## Modular architecture
@@ -261,6 +262,20 @@ pip install -r bench/python/requirements.txt          # optional: pandas and the
 python3 scripts/bench.py run --per-case --libs ours,polars,arrow,python
 python3 scripts/bench.py report
 ```
+
+## Run-time settings
+
+Read once, from the environment, when first needed.
+
+| variable | effect | default |
+|---|---|---|
+| `DATAFRAMES_THREADS` | threads a kernel spreads its input over; `1` disables intra-column parallelism | one per hardware thread |
+| `DATAFRAMES_SPIN_US` | how long idle workers keep polling before they sleep; `0` makes them sleep at once | `100` |
+| `DATAFRAMES_MIN_TASK_BYTES` | smallest piece of input handed to a thread | `32768` |
+| `DATAFRAMES_SIMD=scalar` | use the portable kernels instead of AVX2 | detect |
+| `DATAFRAMES_STREAM_BYTES` | result size from which non-temporal stores are used | size of the last-level cache |
+| `DATAFRAMES_POOL_LIMIT_MB` | cap on recycled large blocks | a quarter of RAM |
+| `DATAFRAMES_NO_POOL`, `DATAFRAMES_NO_HUGEPAGES` | switch off block recycling, or huge pages | off |
 
 ## Status and limits
 

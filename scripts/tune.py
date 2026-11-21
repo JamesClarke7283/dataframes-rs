@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 SETTINGS = {
     "default": {},
-    "half the threads": {"DATAFRAMES_MEMORY_THREADS": str(max(1, (os.cpu_count() or 2) // 2))},
+    "half the threads": {"DATAFRAMES_THREADS": str(max(1, (os.cpu_count() or 2) // 2))},
     "one thread": {"DATAFRAMES_THREADS": "1"},
     "workers sleep at once": {"DATAFRAMES_SPIN_US": "0"},
     "1 MiB per task": {"DATAFRAMES_MIN_TASK_BYTES": str(1 << 20)},
