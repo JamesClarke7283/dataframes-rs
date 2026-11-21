@@ -68,6 +68,17 @@ pub(crate) fn normalize_validity(validity: Option<Bitmap>) -> Option<Bitmap> {
     validity.filter(|v| v.count_zeros() > 0)
 }
 
+/// The validity of rows `start..start + len`, in O(1).
+///
+/// The bitmap is dropped when it is known *without counting* to hold no
+/// null. A long partial slice therefore keeps its bitmap even if the window
+/// happens to be free of nulls: slicing must not cost a pass over the bits.
+#[inline]
+pub(crate) fn slice_validity(validity: Option<&Bitmap>, start: usize, len: usize) -> Option<Bitmap> {
+    let v = validity?.slice(start, len);
+    if v.count_is_known() && v.count_zeros() == 0 { None } else { Some(v) }
+}
+
 /// AND two optional validity bitmaps.
 pub(crate) fn combine_validity(a: Option<&Bitmap>, b: Option<&Bitmap>) -> Option<Bitmap> {
     match (a, b) {
@@ -240,7 +251,9 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
         self.null_count() > 0
     }
 
-    /// The validity bitmap, if the column has nulls.
+    /// The validity bitmap. `None` means no nulls; a long slice of a nullable
+    /// column may carry a bitmap even when its window holds none (see
+    /// [`null_count`](Self::null_count) for the exact answer).
     #[inline]
     pub fn validity(&self) -> Option<&Bitmap> {
         self.validity.as_ref()
@@ -273,7 +286,7 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
     /// buffer regardless.
     #[inline]
     pub fn cont_slice(&self) -> PolarsResult<&[T::Native]> {
-        if self.validity.is_some() {
+        if self.has_nulls() {
             return Err(PolarsError::ComputeError("chunked array is not contiguous".into()));
         }
         Ok(self.values.as_slice())
@@ -372,7 +385,7 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
             name: self.name.clone(),
             // SAFETY: guaranteed by the caller.
             values: unsafe { self.values.slice_unchecked(start, len) },
-            validity: self.validity.as_ref().map(|v| v.slice(start, len)).and_then(|v| normalize_validity(Some(v))),
+            validity: slice_validity(self.validity.as_ref(), start, len),
         }
     }
 
@@ -607,8 +620,43 @@ mod tests {
         assert_eq!(s.null_count(), 2);
         assert_eq!(s.get(0), None);
         assert_eq!(s.get(1), Some(8));
-        // A window without nulls drops its validity entirely.
+        // A short window without nulls drops its validity entirely.
         assert!(opt.slice(1, 6).validity().is_none());
+    }
+
+    #[test]
+    fn long_slices_of_nullable_columns_stay_cheap_and_correct() {
+        // Nulls only among the first hundred rows; the rest is valid.
+        let n = 200_000;
+        let ca = Int64Chunked::from_iter_options("x".into(), (0..n as i64).map(|i| (i >= 100 || i % 3 != 0).then_some(i)));
+        assert_eq!(ca.null_count(), 34);
+
+        // A long window that happens to hold no null: slicing does not count
+        // the bits, so the bitmap may stay - but every answer is exact.
+        let clean = ca.slice(1000, 150_000);
+        assert_eq!(clean.null_count(), 0);
+        assert!(!clean.has_nulls());
+        assert_eq!(clean.cont_slice().unwrap()[0], 1000);
+        assert_eq!(clean.get(149_999), Some(150_999));
+        assert_eq!(clean.sum(), Some((1000..151_000i64).sum()));
+        assert_eq!(clean.filter(&clean.lt(1010i64)).unwrap().len(), 10);
+
+        // A long window with nulls.
+        let dirty = ca.slice(0, 150_000);
+        assert_eq!(dirty.null_count(), 34);
+        assert!(dirty.cont_slice().is_err());
+        assert_eq!((dirty.get(0), dirty.get(1), dirty.get(99)), (None, Some(1), None));
+        assert_eq!(dirty.sum(), Some((0..150_000i64).filter(|i| *i >= 100 || i % 3 != 0).sum()));
+
+        // The same holds for boolean and string columns.
+        let flags = BooleanChunked::from_iter_options("b".into(), (0..n).map(|i| (i >= 100).then_some(i % 2 == 0)));
+        let window = flags.slice(1000, 150_000);
+        assert_eq!((window.null_count(), window.get(0), window.get(1)), (0, Some(true), Some(false)));
+        let words: Vec<Option<String>> = (0..n).map(|i| (i >= 100).then(|| format!("w{i}"))).collect();
+        let strings = StringChunked::from_iter_options("s".into(), words.iter().map(|w| w.as_deref()));
+        let window = strings.slice(1000, 150_000);
+        assert_eq!((window.null_count(), window.get(0)), (0, Some("w1000")));
+        assert_eq!(strings.slice(50, 150_000).null_count(), 50);
     }
 
     #[test]

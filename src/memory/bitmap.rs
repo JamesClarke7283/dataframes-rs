@@ -196,6 +196,12 @@ impl Bitmap {
         count_ones_range(&self.words, self.offset, self.len)
     }
 
+    /// `true` if [`count_ones`](Self::count_ones) answers without counting.
+    #[inline]
+    pub fn count_is_known(&self) -> bool {
+        self.ones != UNKNOWN
+    }
+
     /// Number of clear bits.
     #[inline]
     pub fn count_zeros(&self) -> usize {

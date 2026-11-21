@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 
-use super::{combine_validity, fmt_array, normalize_validity, slice_offsets};
+use super::{combine_validity, fmt_array, normalize_validity, slice_offsets, slice_validity};
 use crate::datatypes::{DataType, IdxSize, PlSmallStr};
 use crate::error::PolarsResult;
 use crate::kernels;
@@ -181,7 +181,7 @@ impl BooleanChunked {
         BooleanChunked {
             name: self.name.clone(),
             values: self.values.slice(start, len),
-            validity: self.validity.as_ref().map(|v| v.slice(start, len)).and_then(|v| normalize_validity(Some(v))),
+            validity: slice_validity(self.validity.as_ref(), start, len),
         }
     }
 

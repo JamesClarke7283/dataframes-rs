@@ -14,7 +14,9 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
-use super::{BooleanChunked, IdxCa, Selection, SortOptions, fmt_array, idx_slice, normalize_validity, slice_offsets};
+use super::{
+    BooleanChunked, IdxCa, Selection, SortOptions, fmt_array, idx_slice, normalize_validity, slice_offsets, slice_validity,
+};
 use crate::datatypes::{DataType, IdxSize, PlSmallStr};
 use crate::error::PolarsResult;
 use crate::kernels::{self, CmpOp, par};
@@ -362,7 +364,7 @@ impl StringChunked {
             name: self.name.clone(),
             views: self.views.slice(start, len),
             buffers: self.buffers.clone(),
-            validity: self.validity.as_ref().map(|v| v.slice(start, len)).and_then(|v| normalize_validity(Some(v))),
+            validity: slice_validity(self.validity.as_ref(), start, len),
         }
     }
 
