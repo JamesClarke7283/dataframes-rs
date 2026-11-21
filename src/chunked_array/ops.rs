@@ -322,7 +322,10 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
         if sel.is_none() {
             return Self::new_empty(self.name.clone());
         }
-        let tasks = tasks.unwrap_or_else(|| par::tasks_for(self.len(), size_of::<T::Native>()));
+        // Without a caller that has already decided, the column decides for
+        // itself; the plan stays alive until the filtered column is built.
+        let plan = tasks.is_none().then(|| par::plan(self.len(), size_of::<T::Native>()));
+        let tasks = tasks.or(plan.as_ref().map(par::Plan::tasks)).unwrap_or(1);
         let values = kernels::filter_by_mask_with(&self.values, &sel.words, tasks, stream);
         let validity = self.validity.as_ref().map(|v| {
             Bitmap::from_words(kernels::compact_bits(&v.words(), &sel.words, sel.len, sel.count), sel.count)
@@ -350,7 +353,8 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
             Resolved::All(true) => self.clone(),
             Resolved::All(false) => Self::new_empty(self.name.clone()),
             Resolved::Kernel(op, v) => {
-                let tasks = par::tasks_for(self.len(), size_of::<T::Native>());
+                let plan = par::plan(self.len(), size_of::<T::Native>());
+                let tasks = plan.tasks();
                 let values = if tasks <= 1 {
                     kernels::filter_by_cmp_scalar(&self.values, op, v)
                 } else {

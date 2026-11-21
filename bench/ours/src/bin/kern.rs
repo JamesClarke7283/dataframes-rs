@@ -123,7 +123,13 @@ fn duo(data: &mut [i64], split: usize, caller_cpu: Option<usize>, helper_cpu: Op
 }
 
 fn report(name: &str, rows: usize, ns: f64) {
-    println!("{name:<44} {:>10.2} µs  {:>7.3} ns/row", ns / 1e3, ns / rows as f64);
+    let learned: Vec<String> = par::resident_decisions()
+        .iter()
+        .map(|&(bytes, split, period, kernel, other)| {
+            format!("{}K:{}/{period} {kernel}|{other}", bytes >> 10, if split { "split" } else { "one" })
+        })
+        .collect();
+    println!("{name:<44} {:>10.2} µs  {:>7.3} ns/row   {}", ns / 1e3, ns / rows as f64, learned.join(" "));
 }
 
 fn main() {
@@ -139,9 +145,16 @@ fn main() {
         seed ^= seed << 17;
         seed
     };
-    let a: Vec<i64> = (0..rows).map(|_| (next() % 1000) as i64).collect();
-    let b: Vec<f64> = (0..rows).map(|_| (next() % 1_000_000) as f64 / 1e6).collect();
-    let c: Vec<i32> = (0..rows).map(|_| (next() % 100) as i32).collect();
+    // Aligned like the columns of the library, so that no vector load
+    // straddles two cache lines.
+    fn aligned<T: Copy + dataframes::memory::Zeroable>(v: Vec<T>) -> AlignedVec<T> {
+        let mut out: AlignedVec<T> = dataframes::memory::zeroed_vec(v.len());
+        out.copy_from_slice(&v);
+        out
+    }
+    let a = aligned((0..rows).map(|_| (next() % 1000) as i64).collect());
+    let b = aligned((0..rows).map(|_| (next() % 1_000_000) as f64 / 1e6).collect());
+    let c = aligned((0..rows).map(|_| (next() % 100) as i32).collect());
     println!(
         "rows {rows}  threads {}  one thread streams {} KiB/µs from cache  L2 {} KiB",
         par::threads(),
@@ -190,6 +203,24 @@ fn main() {
         report("min_max i64 (auto)", rows, time(|| aggregate::min_max(&a)));
         report("min f64 (auto)", rows, time(|| aggregate::min(&b)));
         report("min_max f64 (auto)", rows, time(|| aggregate::min_max(&b)));
+        // The pattern in which a split loses: the calling thread writes the
+        // whole column, then asks for a reduction. The policy has to notice.
+        let mut fresh = aligned(b.to_vec());
+        let mut rewrite_then_sum = || {
+            fresh.iter_mut().for_each(|v| *v += 1.0);
+            aggregate::sum(&fresh)
+        };
+        report("rewrite, then sum f64, first calls", rows, time(&mut rewrite_then_sum));
+        // Long enough for the policy to have tried the other way at least once.
+        (0..10_000).for_each(|_| {
+            black_box(rewrite_then_sum());
+        });
+        report("rewrite, then sum f64, settled", rows, time(&mut rewrite_then_sum));
+        report("sum f64 again, first calls", rows, time(|| aggregate::sum(&b)));
+        (0..10_000).for_each(|_| {
+            black_box(aggregate::sum(&b));
+        });
+        report("sum f64 again, settled", rows, time(|| aggregate::sum(&b)));
     }
     if want("duo") {
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -200,7 +231,7 @@ fn main() {
         for cpu in 0..cpus {
             println!("cpu {cpu} shares a core with {}", siblings(cpu));
         }
-        let mut d = a.clone();
+        let mut d = a.to_vec();
         let half = rows / 2;
         report("one thread, not pinned", rows, time(|| sum_slice(&d)));
         report("team, 2 tasks, 1 helper", rows, time(|| {

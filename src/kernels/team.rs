@@ -40,6 +40,8 @@
 //!   the helper and waits for it.
 //! * Calls from several threads at once, and calls from inside a task, do not
 //!   queue: they run their tasks on the calling thread.
+//! * [`warm`] wakes workers without giving them a job, for a caller that
+//!   wants its next job to find them polling.
 //!
 //! A panic in a task cancels the tasks not yet claimed and is re-raised on
 //! the caller once all helpers have left.
@@ -96,6 +98,8 @@ struct Shared {
     handles: OnceLock<Vec<Thread>>,
     /// First panic payload of the current job.
     panic: Mutex<Option<Box<dyn Any + Send>>>,
+    /// Whether `panic` holds a payload: lets a job that went well skip the lock.
+    panicked: AtomicBool,
     spin: Duration,
 }
 
@@ -148,6 +152,50 @@ pub fn threads() -> usize {
     })
 }
 
+/// Physical cores the team can use: at most [`threads`], and fewer where
+/// several hardware threads share a core.
+///
+/// Two threads of one core share its caches and its path to them, so a
+/// kernel that is limited by how fast data arrives gains nothing from the
+/// second one; the splitting policy uses this count for inputs that sit in
+/// the cache. Where the operating system does not say which threads share a
+/// core, every thread counts as one.
+pub fn cores() -> usize {
+    static CORES: OnceLock<usize> = OnceLock::new();
+    *CORES.get_or_init(|| count_cores().unwrap_or(usize::MAX).clamp(1, threads()))
+}
+
+/// Distinct cores among the CPUs this process may run on.
+#[cfg(target_os = "linux")]
+fn count_cores() -> Option<usize> {
+    // SAFETY: a zeroed CPU set is valid and the call fills at most its size.
+    let allowed = unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut set) != 0 {
+            return None;
+        }
+        set
+    };
+    let mut seen: Vec<String> = Vec::new();
+    for cpu in 0..libc::CPU_SETSIZE as usize {
+        // SAFETY: `cpu` is below the size of the set.
+        if !unsafe { libc::CPU_ISSET(cpu, &allowed) } {
+            continue;
+        }
+        // The same text for every thread of one core, e.g. "0,2" or "4-5".
+        let siblings = std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")).ok()?;
+        if !seen.contains(&siblings) {
+            seen.push(siblings);
+        }
+    }
+    (!seen.is_empty()).then_some(seen.len())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn count_cores() -> Option<usize> {
+    None
+}
+
 /// How long an idle worker polls for the next job before it goes to sleep.
 ///
 /// Defaults to [`DEFAULT_SPIN`]; set the `DATAFRAMES_SPIN_US` environment
@@ -181,6 +229,7 @@ fn team() -> Option<&'static Team> {
             sleeping: (0..wanted).map(|_| AtomicBool::new(false)).collect(),
             handles: OnceLock::new(),
             panic: Mutex::new(None),
+            panicked: AtomicBool::new(false),
             spin: spin_time(),
         });
         let mut handles = Vec::with_capacity(wanted);
@@ -214,17 +263,64 @@ pub fn hot_helpers() -> usize {
     }
 }
 
+/// Whether the workers a job with `helpers` helpers would use are all awake,
+/// so that the job would start without a system call.
+pub fn helpers_awake(helpers: usize) -> bool {
+    match team() {
+        Some(team) => {
+            let s = &*team.shared;
+            helpers <= s.workers()
+                && (s.sleepers.load(Ordering::Relaxed) == 0 || s.sleeping[..helpers].iter().all(|f| !f.load(Ordering::Relaxed)))
+        }
+        None => helpers == 0,
+    }
+}
+
+/// Wake the workers a job with `helpers` helpers would use, without giving
+/// them anything to do: they poll for [`spin_time`], and a job that follows
+/// within that time starts without a system call. Does nothing while another
+/// thread's job is running.
+pub fn warm(helpers: usize) {
+    if helpers == 0 || BUSY.get() {
+        return;
+    }
+    let Some(team) = team() else { return };
+    let Ok(_slot) = team.caller.try_lock() else { return };
+    let s = &*team.shared;
+    if s.sleepers.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    // A new epoch with no job open: a worker that wakes up for it finds
+    // nothing to join and starts polling.
+    s.epoch.0.fetch_add(1, Ordering::SeqCst);
+    wake(s, helpers.min(s.workers()));
+}
+
+/// Wake those of the first `helpers` workers that are asleep. The epoch must
+/// have been bumped first: a worker flags itself asleep before its last look
+/// at the epoch, so one side always notices the other.
+fn wake(s: &Shared, helpers: usize) {
+    if let Some(handles) = s.handles.get() {
+        for (flag, handle) in s.sleeping.iter().zip(handles).take(helpers) {
+            if flag.load(Ordering::SeqCst) {
+                handle.unpark();
+            }
+        }
+    }
+}
+
 /// Call `f(i)` once for every `i` in `0..tasks`, on the calling thread and on
 /// up to `helpers` team workers, and return when all calls have returned.
 ///
-/// With `wake`, sleeping workers are woken to help; without it only workers
-/// that are still polling take part, so the call never makes a system call.
+/// With `wake_sleepers`, sleeping workers are woken to help; without it only
+/// workers that are still polling take part, so the call never makes a
+/// system call.
 /// Which thread runs which index, and in what order, is unspecified.
 ///
 /// # Panics
 /// Re-raises the first panic of `f` after every thread has left the job.
 /// Tasks not yet started at that point are skipped.
-pub fn run(tasks: usize, helpers: usize, wake: bool, f: &Task<'_>) {
+pub fn run(tasks: usize, helpers: usize, wake_sleepers: bool, f: &Task<'_>) {
     let inline = || (0..tasks).for_each(f);
     if tasks <= 1 || helpers == 0 || BUSY.get() {
         return inline();
@@ -243,31 +339,25 @@ pub fn run(tasks: usize, helpers: usize, wake: bool, f: &Task<'_>) {
         let f: *const Task<'static> = std::mem::transmute::<*const Task<'_>, *const Task<'static>>(f);
         *s.job.get() = Job { f, tasks, parts };
     }
-    *lock(&s.panic) = None;
     for (share, cursor) in s.cursors[..parts].iter().enumerate() {
         cursor.0.store(share * tasks / parts, Ordering::Relaxed);
     }
     s.helpers.store(helpers, Ordering::Relaxed);
     s.open.store(true, Ordering::SeqCst);
     s.epoch.0.fetch_add(1, Ordering::SeqCst);
-    if wake && s.sleepers.load(Ordering::SeqCst) > 0 {
-        // Wake exactly the designated helpers that are asleep. The epoch was
-        // bumped first and a worker flags itself asleep before its last look
-        // at the epoch, so one side always notices the other.
-        if let Some(handles) = s.handles.get() {
-            for (flag, handle) in s.sleeping.iter().zip(handles).take(helpers) {
-                if flag.load(Ordering::SeqCst) {
-                    handle.unpark();
-                }
-            }
-        }
+    if wake_sleepers && s.sleepers.load(Ordering::SeqCst) > 0 {
+        wake(s, helpers);
     }
 
     BUSY.set(true);
     // Runs on return and on unwind: stop new claims, close the job, and wait
     // until no helper is inside it. Only then may `f` go out of scope.
     let close = DropGuard::new((), |()| {
-        cancel(s, tasks, parts);
+        // After a normal `drain` every share is used up; only an unwinding
+        // caller has to stop the helpers from claiming more.
+        if std::thread::panicking() {
+            cancel(s, tasks, parts);
+        }
         s.open.store(false, Ordering::SeqCst);
         let mut spins = 0u32;
         while s.active.0.load(Ordering::SeqCst) != 0 {
@@ -278,12 +368,18 @@ pub fn run(tasks: usize, helpers: usize, wake: bool, f: &Task<'_>) {
                 std::thread::yield_now();
             }
         }
+        // The caller's own panic wins; a helper's must not surface in the
+        // next job.
+        if std::thread::panicking() && s.panicked.swap(false, Ordering::Relaxed) {
+            *lock(&s.panic) = None;
+        }
         BUSY.set(false);
     });
     drain(s, tasks, parts, 0, f);
     drop(close);
-    let payload = lock(&s.panic).take();
-    if let Some(payload) = payload {
+    if s.panicked.swap(false, Ordering::Relaxed)
+        && let Some(payload) = lock(&s.panic).take()
+    {
         resume_unwind(payload);
     }
 }
@@ -295,6 +391,12 @@ fn drain(s: &Shared, tasks: usize, parts: usize, me: usize, call: impl Fn(usize)
     for step in 0..parts {
         let share = (me + step) % parts;
         let end = (share + 1) * tasks / parts;
+        // Look before claiming from somebody else's share: a claim takes the
+        // counter's cache line away from its owner, a look at a share that
+        // is used up (the usual case) does not.
+        if step > 0 && s.cursors[share].0.load(Ordering::Relaxed) >= end {
+            continue;
+        }
         loop {
             let i = s.cursors[share].0.fetch_add(1, Ordering::Relaxed);
             if i >= end {
@@ -320,7 +422,18 @@ fn worker_main(s: &Shared, index: usize) {
     // forever next to a team that does not need it.
     let mut idle_since = Instant::now();
     loop {
-        seen = wait_for_job(s, index, seen, idle_since);
+        let (epoch, slept) = wait_for_job(s, index, seen, idle_since);
+        seen = epoch;
+        if slept {
+            // Somebody woke this worker on purpose: poll for a full budget
+            // even if the job that follows is not this one.
+            idle_since = Instant::now();
+        }
+        // A job that does not want this worker is none of its business; this
+        // look is only a shortcut, the real check follows the announcement.
+        if index >= s.helpers.load(Ordering::Relaxed) {
+            continue;
+        }
         s.active.0.fetch_add(1, Ordering::SeqCst);
         if s.open.load(Ordering::SeqCst) && index < s.helpers.load(Ordering::Relaxed) {
             // SAFETY: we announced ourselves and then saw the job open, so
@@ -334,6 +447,7 @@ fn worker_main(s: &Shared, index: usize) {
                 if let Err(payload) = result {
                     cancel(s, job.tasks, job.parts);
                     lock(&s.panic).get_or_insert(payload);
+                    s.panicked.store(true, Ordering::Relaxed);
                 }
             });
             s.active.0.fetch_sub(1, Ordering::SeqCst);
@@ -346,12 +460,13 @@ fn worker_main(s: &Shared, index: usize) {
 
 /// Block until the epoch differs from `seen`; returns the new epoch. Polls
 /// until `idle_since + spin`, then sleeps until a caller unparks this worker.
-fn wait_for_job(s: &Shared, index: usize, seen: u64, idle_since: Instant) -> u64 {
+/// The next epoch after `seen`, and whether the worker slept while waiting.
+fn wait_for_job(s: &Shared, index: usize, seen: u64, idle_since: Instant) -> (u64, bool) {
     while idle_since.elapsed() < s.spin {
         for _ in 0..64 {
             let epoch = s.epoch.0.load(Ordering::Acquire);
             if epoch != seen {
-                return epoch;
+                return (epoch, false);
             }
             std::hint::spin_loop();
         }
@@ -371,7 +486,7 @@ fn wait_for_job(s: &Shared, index: usize, seen: u64, idle_since: Instant) -> u64
     };
     s.sleeping[index].store(false, Ordering::SeqCst);
     s.sleepers.fetch_sub(1, Ordering::SeqCst);
-    epoch
+    (epoch, true)
 }
 
 #[cfg(test)]
@@ -428,6 +543,25 @@ mod tests {
     }
 
     #[test]
+    fn warming_wakes_helpers_without_a_job() {
+        // Whatever the other tests of this process are doing with the team,
+        // these calls must neither block nor disturb a job.
+        for helpers in [0usize, 1, 3, 64] {
+            warm(helpers);
+            let _ = helpers_awake(helpers);
+        }
+        assert!(helpers_awake(0));
+        assert!(!helpers_awake(threads() + 64), "more helpers than the team has are never all awake");
+        let count = AtomicUsize::new(0);
+        run(16, 3, true, &|_| {
+            warm(3);
+            count.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(count.load(Ordering::Relaxed), 16);
+        assert!((1..=threads()).contains(&cores()));
+    }
+
+    #[test]
     fn a_panic_is_propagated_and_the_team_survives() {
         for wake in [true, false] {
             let result = catch_unwind(|| {
@@ -439,10 +573,14 @@ mod tests {
             });
             assert!(result.is_err());
         }
-        let count = AtomicUsize::new(0);
-        run(32, 8, true, &|_| {
-            count.fetch_add(1, Ordering::Relaxed);
-        });
-        assert_eq!(count.load(Ordering::Relaxed), 32);
+        // Neither that panic nor one that a helper may have hit at the same
+        // time surfaces in a later job.
+        for _ in 0..3 {
+            let count = AtomicUsize::new(0);
+            run(32, 8, true, &|_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            });
+            assert_eq!(count.load(Ordering::Relaxed), 32);
+        }
     }
 }

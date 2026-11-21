@@ -1,30 +1,56 @@
 //! Work splitting for the data-parallel kernels.
 //!
-//! A kernel asks how many threads its input is worth ([`tasks_for`]), cuts
-//! the input into a few chunks per thread ([`chunk_rows`]) and hands the
-//! chunks to the [`team`] ([`run`], [`for_each_chunk_mut`],
-//! [`map`]). Every thread has its own share of the chunks — the same part of
-//! the input each time, which keeps a column that is processed repeatedly in
-//! the caches of the cores that hold its parts — and takes over what is left
-//! of the others' shares, so a helper that arrives late or is descheduled
-//! does not hold the rest up.
+//! A kernel asks how many threads its input is worth ([`plan`]), cuts the
+//! input into chunks ([`chunk_rows`]) and hands the chunks to the [`team`]
+//! ([`run`], [`for_each_chunk_mut`], [`map`]). Every thread has its own share
+//! of the chunks — the same part of the input each time — and takes over
+//! what is left of the others' shares, so a helper that arrives late or is
+//! descheduled does not hold the rest up.
 //!
-//! Whether an input goes parallel depends on its size and on the state of the
-//! team:
+//! # Inputs larger than a core's cache
 //!
-//! * below two chunks of [`min_task_bytes`] (32 KiB each) it never does;
-//! * nor does an input that sits in one core's L2 cache and that this core
-//!   gets through in a few microseconds: no hand-off repays itself then. How
-//!   fast "this core" is, is measured once ([`stream_rate`]) — on the fastest
-//!   current CPUs a 100 000-row sum takes three microseconds;
-//! * while team workers are polling ("hot"), anything above that does;
-//! * when they are asleep, waking them costs a system call, which only inputs
-//!   of [`WAKE_BYTES`] or more are worth — unless calls arrive in a burst, in
-//!   which case the second call of the burst wakes the team for the rest.
+//! They are split over every hardware thread, a few chunks each: while team
+//! workers are polling ("hot") always, and when they are asleep if the input
+//! has [`WAKE_BYTES`] or more — waking them costs a system call — or if calls
+//! arrive in a burst, in which case the second call of the burst wakes the
+//! team for the rest.
+//!
+//! # Inputs that fit in a core's cache
+//!
+//! Below two chunks of [`min_task_bytes`] (32 KiB each), or below what one
+//! core streams through in a microsecond ([`stream_rate`], measured once),
+//! an input is never split.
+//!
+//! Above that and up to the size of the private (L2) cache, where the data
+//! *is* decides, and no rule can know that. Measured on six server CPUs: if
+//! each core already holds its part of a column — because the column is read
+//! again and again, or was last written by the same split — two cores finish
+//! in half the time of one (a 100 000-row sum: 1.9 µs instead of 3.2 µs on a
+//! Zen 5, 3.8 instead of 7.7 on a Zen 4). If the calling thread has just
+//! written the column, the second core must pull every cache line across,
+//! at a tenth of the speed, and the same split takes two to three times
+//! *longer* than no split.
+//!
+//! So the policy measures instead of guessing. For each size class it keeps
+//! one decision — split or not — which starts as "not". Every so often it
+//! times six calls as they are, runs the next eight the other way (two to
+//! move the data, six timed; see [`Plan`]), and changes its mind if the
+//! kernel took at least a ninth less time that way *and* the caller's whole
+//! cycle, from one call to the next, did not get longer — a split that makes
+//! the kernel faster by making the caller's own writes slower is no gain. A
+//! trial that changes nothing makes the next one wait four times as long, so
+//! a workload that is settled pays next to nothing, and one that changes
+//! character is followed. The decision is shared by all kernels, so that one
+//! writing a column and one reading it agree on which core holds what.
+//!
+//! A split of a cache-resident input uses one thread per *physical* core
+//! (two threads of one core share its cache and the path to it), at most
+//! [`RESIDENT_PARTS`], with one equal chunk each: nothing is left to be taken
+//! over, so nothing changes cores.
 
 use std::mem::MaybeUninit;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use super::{aggregate, cache, team};
@@ -87,23 +113,33 @@ fn now_nanos() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_nanos() as u64
 }
 
-/// Whether sleeping workers should be woken for an input of `bytes` bytes.
+/// Whether this call follows another one that found the team asleep within
+/// [`BURST_NANOS`]: the calls after a wake-up will then find it polling.
 #[cold]
-fn worth_waking(bytes: usize) -> bool {
+fn burst() -> bool {
     static LAST: AtomicU64 = AtomicU64::new(0);
-    if bytes >= WAKE_BYTES {
-        return true;
-    }
-    // A small input: wake the team only if such calls are arriving in a
-    // burst, in which case the calls that follow will find it polling.
     let now = now_nanos().max(1);
     let last = LAST.swap(now, Ordering::Relaxed);
     last != 0 && now.saturating_sub(last) < BURST_NANOS
 }
 
+/// Whether sleeping workers should be woken for an input of `bytes` bytes.
+#[cold]
+fn worth_waking(bytes: usize) -> bool {
+    bytes >= WAKE_BYTES || burst()
+}
+
 /// A serial pass shorter than this is not worth splitting when its input
-/// already sits in the calling core's L2.
+/// already sits in the calling core's L2 and nothing is known about where
+/// the helpers' parts are ([`tasks_for`]).
 const MIN_PARALLEL_NANOS: usize = 4_000;
+
+/// An input that one core streams through faster than this is never split:
+/// the hand-off alone takes a few hundred nanoseconds.
+const MIN_SPLIT_NANOS: usize = 1_000;
+
+/// Most threads that share an input which fits in one core's cache.
+pub const RESIDENT_PARTS: usize = 4;
 
 /// Bytes per microsecond that one thread of this machine streams through a
 /// reduction when the data is in its own cache. Measured once, on first use
@@ -124,32 +160,29 @@ pub fn stream_rate() -> usize {
 }
 
 /// Number of threads (at least 1) to use for `rows` rows of `row_bytes` bytes
-/// of input each. See the [module documentation](self) for the policy.
+/// of input each, from the size of the input and the state of the team alone.
+///
+/// For callers that split by something other than row ranges (one column per
+/// thread, say), where the learned decision of [`plan`] does not apply. An
+/// input that fits in the calling core's cache is split only if that core
+/// would need more than a few microseconds for it.
 #[inline]
 pub fn tasks_for(rows: usize, row_bytes: usize) -> usize {
-    tasks_for_work(rows, row_bytes, 2)
-}
-
-/// [`tasks_for`] for kernels that do next to nothing per byte (sums, minima,
-/// element-wise arithmetic): they finish a cache-resident input sooner than
-/// a comparison or a compaction does, so they need more of it to be worth
-/// splitting.
-#[inline]
-pub fn tasks_for_light(rows: usize, row_bytes: usize) -> usize {
-    tasks_for_work(rows, row_bytes, 1)
-}
-
-/// `work` is the cost of the kernel per input byte, in units of a plain sum.
-#[inline]
-fn tasks_for_work(rows: usize, row_bytes: usize, work: usize) -> usize {
     let bytes = rows.saturating_mul(row_bytes);
     let by_size = bytes / min_task_bytes();
     if by_size <= 1 {
         return 1;
     }
-    if bytes <= cache::cache_info().l2 && bytes.saturating_mul(work) < stream_rate() * (MIN_PARALLEL_NANOS / 1000) {
+    // Twice the cost of a plain sum per byte: a comparison or a compaction.
+    if bytes <= cache::cache_info().l2 && bytes.saturating_mul(2) < stream_rate() * (MIN_PARALLEL_NANOS / 1000) {
         return 1;
     }
+    tasks_beyond_cache(bytes, by_size)
+}
+
+/// Threads for an input that no single core holds in its cache.
+#[inline]
+fn tasks_beyond_cache(bytes: usize, by_size: usize) -> usize {
     let limit = by_size.min(threads());
     if limit <= 1 {
         return 1;
@@ -158,15 +191,314 @@ fn tasks_for_work(rows: usize, row_bytes: usize, work: usize) -> usize {
     if hot >= limit || worth_waking(bytes) { limit } else { hot.min(limit) }
 }
 
+/// Calls before a size class first tries the other way.
+const FIRST_TRIAL: u32 = 8;
+/// Calls between a change of mind and the next trial. Every trial that
+/// changes nothing multiplies the wait by four, up to [`MAX_TRIAL_PERIOD`]:
+/// that bounds both what a settled workload pays for trials (fourteen calls
+/// in four thousand) and how long a workload that changed character runs the
+/// wrong way.
+const TRIAL_PERIOD: u32 = 128;
+const MAX_TRIAL_PERIOD: u32 = 1 << 12;
+/// Timed calls on either side of a trial.
+const WINDOW: u8 = 6;
+/// Calls at the start of a trial that are not timed: they move the data to
+/// where the mode under trial wants it.
+const TRIAL_SKIP: u8 = 2;
+/// Calls a trial of splitting waits for the helpers to wake up (they need
+/// tens of microseconds, and a call can take less than one).
+const WARM_CALLS: u32 = 512;
+/// "Not measured" in [`Lane::kernel`] and [`Lane::cycle`].
+const UNKNOWN: u32 = u32::MAX;
+
+/// Nothing is timed; the decision is simply applied.
+const STEADY: u8 = 0;
+/// The last [`WINDOW`] calls before a trial, timed under the decision.
+const BASELINE: u8 = 1;
+/// A trial of splitting waits for the helpers to wake up.
+const WARMING: u8 = 2;
+/// Calls run the other way: [`TRIAL_SKIP`] untimed, then [`WINDOW`] timed.
+const TRIAL: u8 = 3;
+
+/// What the policy knows about cache-resident inputs of one size class.
+///
+/// Plain atomics, read and written without coordination: the fields are
+/// statistics and a decision that is re-examined all the time, and callers
+/// on several threads at worst lose an update. (Only one of them can have
+/// the team anyway.) Times are nanoseconds.
+#[repr(align(64))]
+struct Lane {
+    /// Calls since the last decision.
+    calls: AtomicU32,
+    /// Calls between a decision and the next trial.
+    period: AtomicU32,
+    /// The decision: whether inputs of this class are split.
+    split: AtomicBool,
+    /// [`STEADY`], [`BASELINE`], [`WARMING`] or [`TRIAL`].
+    phase: AtomicU8,
+    /// Calls left in the phase.
+    left: AtomicU8,
+    /// Shortest kernel call of the baseline window (`[0]`, under the
+    /// decision) and of the trial (`[1]`, the other way).
+    kernel: [AtomicU32; 2],
+    /// Shortest time from the start of one call to the start of the next, in
+    /// the same two windows: the kernel plus whatever the caller does in
+    /// between, which is where a split can cost what it saved.
+    cycle: [AtomicU32; 2],
+    /// When the previous call of the window started; 0 at its beginning.
+    last_start: AtomicU64,
+}
+
+impl Lane {
+    const fn new() -> Self {
+        Self {
+            calls: AtomicU32::new(0),
+            period: AtomicU32::new(FIRST_TRIAL),
+            split: AtomicBool::new(false),
+            phase: AtomicU8::new(STEADY),
+            left: AtomicU8::new(0),
+            kernel: [AtomicU32::new(UNKNOWN), AtomicU32::new(UNKNOWN)],
+            cycle: [AtomicU32::new(UNKNOWN), AtomicU32::new(UNKNOWN)],
+            last_start: AtomicU64::new(0),
+        }
+    }
+
+    /// Decide about one call that could use `parts` threads.
+    fn plan(&'static self, parts: usize) -> Plan {
+        const R: Ordering = Ordering::Relaxed;
+        let calls = self.calls.load(R).wrapping_add(1);
+        self.calls.store(calls, R);
+        let mut split = self.split.load(R);
+        let (mut phase, mut left) = (self.phase.load(R), self.left.load(R));
+
+        // Phase changes. The windows on both sides of a trial are adjacent
+        // in time, so they see the same workload; a call is only looked at
+        // after the previous one has reported, hence "left == 0" is checked
+        // on the call *after* a window.
+        if phase == STEADY && calls >= self.period.load(R) {
+            for best in self.kernel.iter().chain(&self.cycle) {
+                best.store(UNKNOWN, R);
+            }
+            self.last_start.store(0, R);
+            (phase, left) = (BASELINE, WINDOW);
+        } else if phase == BASELINE && left == 0 {
+            self.last_start.store(0, R);
+            if split {
+                (phase, left) = (TRIAL, TRIAL_SKIP + WINDOW);
+            } else {
+                // The helpers of a class that does not split are asleep.
+                team::warm(parts - 1);
+                phase = WARMING;
+            }
+        }
+        if phase == WARMING {
+            if team::helpers_awake(parts - 1) {
+                (phase, left) = (TRIAL, TRIAL_SKIP + WINDOW);
+            } else if calls >= self.period.load(R).saturating_add(WARM_CALLS) {
+                // Calls too far apart for the helpers to stay awake between
+                // them: there is nothing to try.
+                self.settle(false);
+                phase = STEADY;
+            }
+        } else if phase == TRIAL && left == 0 {
+            let better = self.other_way_is_better();
+            if better {
+                split = !split;
+                self.split.store(split, R);
+            }
+            self.settle(better);
+            phase = STEADY;
+        }
+
+        let (want_split, timed, trial) = match phase {
+            BASELINE => {
+                left = left.saturating_sub(1);
+                (split, true, false)
+            }
+            TRIAL => {
+                left = left.saturating_sub(1);
+                (!split, left < WINDOW, true)
+            }
+            _ => (split, false, false),
+        };
+        if phase != STEADY {
+            self.phase.store(phase, R);
+            self.left.store(left, R);
+        }
+
+        let tasks = if !want_split {
+            1
+        } else if team::helpers_awake(parts - 1) {
+            parts
+        } else {
+            // The class splits, but the team went to sleep since: this call
+            // runs alone, and if more are coming the team is woken for them.
+            if phase == STEADY && burst() {
+                team::warm(parts - 1);
+            }
+            1
+        };
+        if phase != BASELINE && phase != TRIAL {
+            return Plan::fixed(tasks);
+        }
+        // Inside a window every call notes when it started; the timed ones
+        // also report. A call that could not run the way it was meant to
+        // says nothing.
+        let start = now_nanos().max(1);
+        let previous = self.last_start.swap(start, R);
+        let timed = timed && (tasks > 1) == want_split;
+        if timed && previous != 0 {
+            lower(&self.cycle[usize::from(trial)], start.saturating_sub(previous));
+        }
+        Plan { tasks, sample: timed.then_some(Sample { lane: self, trial, start }) }
+    }
+
+    /// The verdict of a trial.
+    fn other_way_is_better(&self) -> bool {
+        const R: Ordering = Ordering::Relaxed;
+        let [kernel, other_kernel] = [0, 1].map(|i| u64::from(self.kernel[i].load(R)));
+        let [cycle, other_cycle] = [0, 1].map(|i| u64::from(self.cycle[i].load(R)));
+        let unknown = u64::from(UNKNOWN);
+        if kernel == unknown || other_kernel == unknown {
+            return false;
+        }
+        // A clear gain: a ninth less time in the kernel.
+        let kernel_faster = other_kernel * 9 < kernel * 8;
+        if cycle == unknown || other_cycle == unknown || cycle >= 16 * kernel {
+            // The caller does so much between two calls that its cycle says
+            // nothing about the kernel.
+            return kernel_faster;
+        }
+        // Otherwise the caller's whole cycle has the last word: a kernel
+        // that got faster by making its caller slower (the caller writes the
+        // column, the helpers have to fetch it, the caller has to get it
+        // back) is no gain, and one that got slower may be.
+        (kernel_faster && other_cycle <= cycle) || other_cycle + kernel / 4 < cycle
+    }
+
+    /// Back to [`STEADY`] after a trial. One that changed nothing makes the
+    /// next one wait four times as long.
+    fn settle(&self, changed: bool) {
+        const R: Ordering = Ordering::Relaxed;
+        let period = if changed { TRIAL_PERIOD } else { self.period.load(R).saturating_mul(4).min(MAX_TRIAL_PERIOD) };
+        self.period.store(period, R);
+        self.calls.store(0, R);
+        self.phase.store(STEADY, R);
+        self.left.store(0, R);
+    }
+}
+
+/// `best = min(best, nanos)`.
+fn lower(best: &AtomicU32, nanos: u64) {
+    let nanos = nanos.min(u64::from(UNKNOWN - 1)) as u32;
+    if nanos < best.load(Ordering::Relaxed) {
+        best.store(nanos, Ordering::Relaxed);
+    }
+}
+
+/// One lane per power of two of input size, 64 KiB to 8 MiB and beyond.
+static LANES: [Lane; 8] = [const { Lane::new() }; 8];
+
+fn lane_for(bytes: usize) -> &'static Lane {
+    &LANES[(bytes.max(1).ilog2() as usize).clamp(16, 23) - 16]
+}
+
+/// What the policy currently does with inputs that fit in a core's cache:
+/// for every size class that has been used, the smallest input size of the
+/// class in bytes, whether such inputs are split, how many calls lie between
+/// two trials of the alternative, and the shortest kernel call (nanoseconds,
+/// `u32::MAX` if unknown) of the last trial under the decision and the other
+/// way. For diagnostics and tuning.
+pub fn resident_decisions() -> Vec<(usize, bool, u32, u32, u32)> {
+    const R: Ordering = Ordering::Relaxed;
+    LANES
+        .iter()
+        .enumerate()
+        .filter(|(_, lane)| lane.calls.load(R) != 0 || lane.period.load(R) != FIRST_TRIAL)
+        .map(|(i, lane)| (1usize << (16 + i), lane.split.load(R), lane.period.load(R), lane.kernel[0].load(R), lane.kernel[1].load(R)))
+        .collect()
+}
+
+struct Sample {
+    lane: &'static Lane,
+    trial: bool,
+    start: u64,
+}
+
+/// How one kernel call is split, from [`plan`].
+///
+/// Keep it alive until the work is done: for inputs that fit in a core's
+/// cache some calls are timed, from the creation of the plan to its drop,
+/// and the policy learns from the result (see the [module documentation](self)).
+#[must_use = "a plan times the work it was made for: keep it until the work is done"]
+pub struct Plan {
+    tasks: usize,
+    sample: Option<Sample>,
+}
+
+impl Plan {
+    /// Number of threads (at least 1) to use, the calling thread included.
+    #[inline]
+    pub fn tasks(&self) -> usize {
+        self.tasks
+    }
+
+    #[inline]
+    fn fixed(tasks: usize) -> Self {
+        Self { tasks, sample: None }
+    }
+}
+
+impl Drop for Plan {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(sample) = self.sample.take() {
+            lower(&sample.lane.kernel[usize::from(sample.trial)], now_nanos().saturating_sub(sample.start));
+        }
+    }
+}
+
+/// How to split a kernel call over `rows` rows of `row_bytes` bytes of input
+/// each. See the [module documentation](self) for the policy.
+#[inline]
+pub fn plan(rows: usize, row_bytes: usize) -> Plan {
+    let bytes = rows.saturating_mul(row_bytes);
+    let by_size = bytes / min_task_bytes();
+    if by_size <= 1 {
+        return Plan::fixed(1);
+    }
+    if bytes > cache::cache_info().l2 {
+        return Plan::fixed(tasks_beyond_cache(bytes, by_size));
+    }
+    resident_plan(bytes, by_size)
+}
+
+/// [`plan`] for an input that fits in the calling core's cache.
+fn resident_plan(bytes: usize, by_size: usize) -> Plan {
+    let parts = by_size.min(RESIDENT_PARTS).min(team::cores());
+    if parts <= 1 || bytes < stream_rate() * (MIN_SPLIT_NANOS / 1000) {
+        return Plan::fixed(1);
+    }
+    lane_for(bytes).plan(parts)
+}
+
 /// Rows per chunk when `rows` rows are processed by `threads` threads: a
-/// multiple of 64 (so every chunk owns whole mask words) that gives each
-/// thread a few chunks without making any chunk smaller than
-/// [`min_task_bytes`].
+/// multiple of 64, so that every chunk owns whole mask words.
+///
+/// An input larger than a core's cache gets a few chunks per thread (none
+/// smaller than [`min_task_bytes`]), which lets a thread that finishes early
+/// take over from one that is late. An input that fits in the cache gets
+/// exactly one chunk per thread: each thread then touches the same part
+/// every time, and that part stays in its core's cache.
 #[inline]
 pub fn chunk_rows(rows: usize, row_bytes: usize, threads: usize) -> usize {
     let threads = threads.max(1);
-    let min_rows = (min_task_bytes() / row_bytes.max(1)).max(64);
-    let chunks = (rows / min_rows).clamp(threads, threads * CHUNKS_PER_THREAD);
+    let chunks = if rows.saturating_mul(row_bytes) <= cache::cache_info().l2 {
+        threads
+    } else {
+        let min_rows = (min_task_bytes() / row_bytes.max(1)).max(64);
+        (rows / min_rows).clamp(threads, threads * CHUNKS_PER_THREAD)
+    };
     (rows.div_ceil(chunks).div_ceil(64) * 64).max(64)
 }
 
@@ -293,6 +625,88 @@ mod tests {
                 assert!(r.len() <= tasks.max(1) || rows < 64 * tasks);
             }
         }
+    }
+
+    fn lane_with(kernel: [u32; 2], cycle: [u32; 2]) -> Lane {
+        let lane = Lane::new();
+        for i in 0..2 {
+            lane.kernel[i].store(kernel[i], Ordering::Relaxed);
+            lane.cycle[i].store(cycle[i], Ordering::Relaxed);
+        }
+        lane
+    }
+
+    #[test]
+    fn a_trial_is_judged_by_the_kernel_and_by_the_callers_cycle() {
+        // (kernel now, kernel the other way), (cycle now, cycle the other way)
+        let cases = [
+            // Nothing measured on one side: no change.
+            (([UNKNOWN, 1_000], [UNKNOWN, UNKNOWN]), false),
+            (([3_000, UNKNOWN], [3_100, UNKNOWN]), false),
+            // A tight loop over a column that is only read: both get faster.
+            (([3_000, 1_700], [3_100, 1_800]), true),
+            // A gain below a ninth is not worth changing for.
+            (([3_000, 2_800], [3_100, 2_900]), false),
+            // The kernel got faster but the caller's loop got slower: the
+            // helpers took the column away from the thread that writes it.
+            (([2_500, 1_500], [8_800, 10_900]), false),
+            // The same from the other side: the kernel alone is slower
+            // without helpers, the loop as a whole clearly faster.
+            (([1_500, 2_500], [10_900, 8_800]), true),
+            // The kernel got slower and the loop did not gain: stay.
+            (([1_700, 3_000], [1_800, 3_100]), false),
+            // The caller does so much between calls that its cycle says
+            // nothing: the kernel decides alone.
+            (([3_000, 1_700], [900_000, 1_100_000]), true),
+            (([3_000, 2_900], [900_000, 500_000]), false),
+            // No cycle was measured (calls did not follow each other).
+            (([3_000, 1_700], [UNKNOWN, UNKNOWN]), true),
+        ];
+        for ((kernel, cycle), want) in cases {
+            assert_eq!(lane_with(kernel, cycle).other_way_is_better(), want, "kernel {kernel:?} cycle {cycle:?}");
+        }
+    }
+
+    #[test]
+    fn a_lane_starts_alone_and_times_a_window_before_it_tries_anything() {
+        let lane: &'static Lane = Box::leak(Box::new(Lane::new()));
+        for call in 1..FIRST_TRIAL {
+            let plan = lane.plan(2);
+            assert!(plan.tasks() == 1 && plan.sample.is_none(), "call {call}");
+        }
+        for call in 0..WINDOW {
+            let plan = lane.plan(2);
+            assert_eq!(plan.tasks(), 1, "baseline call {call}");
+            assert!(plan.sample.as_ref().is_some_and(|s| !s.trial), "baseline call {call}");
+        }
+        assert_ne!(lane.kernel[0].load(Ordering::Relaxed), UNKNOWN);
+        assert_ne!(lane.cycle[0].load(Ordering::Relaxed), UNKNOWN);
+        // Whatever the team does from here on, the lane keeps answering and
+        // comes back to a decision.
+        for _ in 0..20_000 {
+            let plan = lane.plan(2);
+            assert!((1..=2).contains(&plan.tasks()));
+        }
+        assert!(lane.period.load(Ordering::Relaxed) > FIRST_TRIAL);
+        assert!(lane.period.load(Ordering::Relaxed) <= MAX_TRIAL_PERIOD);
+    }
+
+    #[test]
+    fn plans_are_sized_by_the_input() {
+        assert_eq!(plan(0, 8).tasks(), 1);
+        assert_eq!(plan(100, 8).tasks(), 1);
+        assert_eq!(plan(min_task_bytes() / 8, 8).tasks(), 1);
+        for rows in [10_000usize, 100_000, 1_000_000, 50_000_000] {
+            let tasks = plan(rows, 8).tasks();
+            assert!((1..=threads()).contains(&tasks), "rows {rows}: {tasks}");
+            // One chunk per thread where the input fits in the cache, a few
+            // where it does not.
+            let chunks = rows.div_ceil(chunk_rows(rows, 8, tasks.max(2)));
+            if rows * 8 <= cache::cache_info().l2 {
+                assert!(chunks <= tasks.max(2), "rows {rows}: {chunks} chunks");
+            }
+        }
+        assert!(team::cores() >= 1 && team::cores() <= threads());
     }
 
     #[test]

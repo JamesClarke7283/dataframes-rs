@@ -601,7 +601,8 @@ pub const BLOCK_ROWS: usize = 4096;
 /// `values[i] op rhs` as mask words plus the number of matches.
 /// Uses every core for large inputs.
 pub fn cmp_scalar_mask<T: Kernel>(values: &[T], op: CmpOp, rhs: T) -> (AlignedVec<u64>, usize) {
-    cmp_scalar_mask_with(values, op, rhs, par::tasks_for(values.len(), size_of::<T>()))
+    let plan = par::plan(values.len(), size_of::<T>());
+    cmp_scalar_mask_with(values, op, rhs, plan.tasks())
 }
 
 /// [`cmp_scalar_mask`] with an explicit degree of parallelism.
@@ -636,7 +637,8 @@ pub fn cmp_values_mask<T: Kernel>(lhs: &[T], rhs: &[T], op: CmpOp) -> (AlignedVe
     assert_eq!(lhs.len(), rhs.len(), "comparison operands must have equal length");
     let n = lhs.len();
     let mut words: AlignedVec<u64> = zeroed_vec(words_for(n));
-    let tasks = par::tasks_for(n, 2 * size_of::<T>());
+    let plan = par::plan(n, 2 * size_of::<T>());
+    let tasks = plan.tasks();
     let count = if tasks <= 1 || n < 128 {
         T::cmp_values(lhs, rhs, op, &mut words)
     } else {
@@ -655,7 +657,8 @@ pub fn cmp_values_mask<T: Kernel>(lhs: &[T], rhs: &[T], op: CmpOp) -> (AlignedVe
 /// The elements of `values` whose bit is set in `mask` (aligned words covering
 /// `values.len()` bits). Uses every core for large inputs.
 pub fn filter_by_mask<T: Pod>(values: &[T], mask: &[u64]) -> AlignedVec<T> {
-    filter_by_mask_with(values, mask, par::tasks_for(values.len(), size_of::<T>()), None)
+    let plan = par::plan(values.len(), size_of::<T>());
+    filter_by_mask_with(values, mask, plan.tasks(), None)
 }
 
 /// [`filter_by_mask`] with the degree of parallelism and the store policy
@@ -807,7 +810,8 @@ pub fn count_cmp_scalar<T: Kernel>(values: &[T], op: CmpOp, rhs: T) -> usize {
         v.chunks(BLOCK_ROWS).map(|b| T::cmp_scalar(b, op, rhs, &mut words)).sum()
     };
     let n = values.len();
-    let tasks = par::tasks_for(n, size_of::<T>());
+    let plan = par::plan(n, size_of::<T>());
+    let tasks = plan.tasks();
     if tasks <= 1 {
         return serial(values);
     }
