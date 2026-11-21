@@ -924,15 +924,15 @@ pub unsafe fn copy_stream(src: *const u8, dst: *mut u8, n: usize) {
 // ---------------------------------------------------------------------------
 
 macro_rules! min_max_float_kernel {
-    ($(#[$doc:meta])* $name:ident, $t:ty, $vec:ty, lanes = $lanes:expr,
+    ($(#[$doc:meta])* $name:ident, $t:ty, $vec:ty, features = $features:literal, lanes = $lanes:expr,
      load = $load:ident, set1 = $set1:ident, min = $min:ident, max = $max:ident, store = $store:ident) => {
         $(#[$doc])*
         ///
         /// NaN is ignored. Returns `(+inf, -inf)` if there is no non-NaN value.
         ///
         /// # Safety
-        /// The CPU must support AVX2.
-        #[target_feature(enable = "avx2")]
+        /// The CPU must support the instruction set this kernel is compiled for.
+        #[target_feature(enable = $features)]
         pub unsafe fn $name(values: &[$t]) -> ($t, $t) {
             const L: usize = $lanes;
             let mut lo = [$set1(<$t>::INFINITY); 4];
@@ -973,19 +973,21 @@ macro_rules! min_max_float_kernel {
     };
 }
 
+pub(super) use min_max_float_kernel;
+
 min_max_float_kernel!(
     /// Smallest and largest `f64`.
-    min_max_f64, f64, __m256d, lanes = 4,
+    min_max_f64, f64, __m256d, features = "avx2", lanes = 4,
     load = _mm256_loadu_pd, set1 = _mm256_set1_pd, min = _mm256_min_pd, max = _mm256_max_pd, store = _mm256_storeu_pd
 );
 min_max_float_kernel!(
     /// Smallest and largest `f32`.
-    min_max_f32, f32, __m256, lanes = 8,
+    min_max_f32, f32, __m256, features = "avx2", lanes = 8,
     load = _mm256_loadu_ps, set1 = _mm256_set1_ps, min = _mm256_min_ps, max = _mm256_max_ps, store = _mm256_storeu_ps
 );
 
 macro_rules! min_or_max_float_kernel {
-    ($(#[$doc:meta])* $name:ident, $t:ty, lanes = $lanes:expr, init = $init:expr,
+    ($(#[$doc:meta])* $name:ident, $t:ty, features = $features:literal, lanes = $lanes:expr, init = $init:expr,
      load = $load:ident, set1 = $set1:ident, op = $op:ident, store = $store:ident, better = $better:tt) => {
         $(#[$doc])*
         ///
@@ -993,8 +995,8 @@ macro_rules! min_or_max_float_kernel {
         /// for a maximum) if there is no non-NaN value.
         ///
         /// # Safety
-        /// The CPU must support AVX2.
-        #[target_feature(enable = "avx2")]
+        /// The CPU must support the instruction set this kernel is compiled for.
+        #[target_feature(enable = $features)]
         pub unsafe fn $name(values: &[$t]) -> $t {
             const L: usize = $lanes;
             // Eight accumulators: the operation has a latency of four cycles
@@ -1024,24 +1026,26 @@ macro_rules! min_or_max_float_kernel {
     };
 }
 
+pub(super) use min_or_max_float_kernel;
+
 min_or_max_float_kernel!(
     /// Smallest `f64`.
-    min_f64, f64, lanes = 4, init = f64::INFINITY,
+    min_f64, f64, features = "avx2", lanes = 4, init = f64::INFINITY,
     load = _mm256_loadu_pd, set1 = _mm256_set1_pd, op = _mm256_min_pd, store = _mm256_storeu_pd, better = <
 );
 min_or_max_float_kernel!(
     /// Largest `f64`.
-    max_f64, f64, lanes = 4, init = f64::NEG_INFINITY,
+    max_f64, f64, features = "avx2", lanes = 4, init = f64::NEG_INFINITY,
     load = _mm256_loadu_pd, set1 = _mm256_set1_pd, op = _mm256_max_pd, store = _mm256_storeu_pd, better = >
 );
 min_or_max_float_kernel!(
     /// Smallest `f32`.
-    min_f32, f32, lanes = 8, init = f32::INFINITY,
+    min_f32, f32, features = "avx2", lanes = 8, init = f32::INFINITY,
     load = _mm256_loadu_ps, set1 = _mm256_set1_ps, op = _mm256_min_ps, store = _mm256_storeu_ps, better = <
 );
 min_or_max_float_kernel!(
     /// Largest `f32`.
-    max_f32, f32, lanes = 8, init = f32::NEG_INFINITY,
+    max_f32, f32, features = "avx2", lanes = 8, init = f32::NEG_INFINITY,
     load = _mm256_loadu_ps, set1 = _mm256_set1_ps, op = _mm256_max_ps, store = _mm256_storeu_ps, better = >
 );
 

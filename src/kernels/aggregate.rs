@@ -129,6 +129,11 @@ macro_rules! impl_num_float {
                 // LLVM keeps the select-based lanes scalar for floats, so use
                 // `vminp*`/`vmaxp*` directly where they exist.
                 #[cfg(target_arch = "x86_64")]
+                if super::level() >= super::Level::Avx512 {
+                    // SAFETY: AVX-512 was detected.
+                    return unsafe { super::x86_512::$kernel(values) };
+                }
+                #[cfg(target_arch = "x86_64")]
                 if super::level() >= super::Level::Avx2 {
                     // SAFETY: AVX2 was detected.
                     return unsafe { super::x86::$kernel(values) };
@@ -139,6 +144,11 @@ macro_rules! impl_num_float {
             #[inline]
             fn min_piece(values: &[Self]) -> Self {
                 #[cfg(target_arch = "x86_64")]
+                if super::level() >= super::Level::Avx512 {
+                    // SAFETY: AVX-512 was detected.
+                    return unsafe { super::x86_512::$min(values) };
+                }
+                #[cfg(target_arch = "x86_64")]
                 if super::level() >= super::Level::Avx2 {
                     // SAFETY: AVX2 was detected.
                     return unsafe { super::x86::$min(values) };
@@ -148,6 +158,11 @@ macro_rules! impl_num_float {
 
             #[inline]
             fn max_piece(values: &[Self]) -> Self {
+                #[cfg(target_arch = "x86_64")]
+                if super::level() >= super::Level::Avx512 {
+                    // SAFETY: AVX-512 was detected.
+                    return unsafe { super::x86_512::$max(values) };
+                }
                 #[cfg(target_arch = "x86_64")]
                 if super::level() >= super::Level::Avx2 {
                     // SAFETY: AVX2 was detected.

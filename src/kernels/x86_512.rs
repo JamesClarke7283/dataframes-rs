@@ -26,8 +26,8 @@ use std::arch::x86_64::*;
 use super::CmpOp;
 use super::scalar;
 use super::x86::{
-    GROUP_WORDS, M01, M0F, M33, M55, STAGE_BYTES, StreamOut, compact_kernel, compact_stream_kernel, sparse_steps,
-    sparse_word,
+    GROUP_WORDS, M01, M0F, M33, M55, STAGE_BYTES, StreamOut, compact_kernel, compact_stream_kernel,
+    min_max_float_kernel, min_or_max_float_kernel, sparse_steps, sparse_word,
 };
 
 // ---------------------------------------------------------------------------
@@ -351,3 +351,38 @@ pub unsafe fn mask_indices(mask: &[u64], n: usize, base: u32, out: *mut u32) -> 
     }
     o
 }
+
+// ---------------------------------------------------------------------------
+// floating-point minimum and maximum
+// ---------------------------------------------------------------------------
+
+min_max_float_kernel!(
+    /// Smallest and largest `f64`.
+    min_max_f64, f64, __m512d, features = "avx512f", lanes = 8,
+    load = _mm512_loadu_pd, set1 = _mm512_set1_pd, min = _mm512_min_pd, max = _mm512_max_pd, store = _mm512_storeu_pd
+);
+min_max_float_kernel!(
+    /// Smallest and largest `f32`.
+    min_max_f32, f32, __m512, features = "avx512f", lanes = 16,
+    load = _mm512_loadu_ps, set1 = _mm512_set1_ps, min = _mm512_min_ps, max = _mm512_max_ps, store = _mm512_storeu_ps
+);
+min_or_max_float_kernel!(
+    /// Smallest `f64`.
+    min_f64, f64, features = "avx512f", lanes = 8, init = f64::INFINITY,
+    load = _mm512_loadu_pd, set1 = _mm512_set1_pd, op = _mm512_min_pd, store = _mm512_storeu_pd, better = <
+);
+min_or_max_float_kernel!(
+    /// Largest `f64`.
+    max_f64, f64, features = "avx512f", lanes = 8, init = f64::NEG_INFINITY,
+    load = _mm512_loadu_pd, set1 = _mm512_set1_pd, op = _mm512_max_pd, store = _mm512_storeu_pd, better = >
+);
+min_or_max_float_kernel!(
+    /// Smallest `f32`.
+    min_f32, f32, features = "avx512f", lanes = 16, init = f32::INFINITY,
+    load = _mm512_loadu_ps, set1 = _mm512_set1_ps, op = _mm512_min_ps, store = _mm512_storeu_ps, better = <
+);
+min_or_max_float_kernel!(
+    /// Largest `f32`.
+    max_f32, f32, features = "avx512f", lanes = 16, init = f32::NEG_INFINITY,
+    load = _mm512_loadu_ps, set1 = _mm512_set1_ps, op = _mm512_max_ps, store = _mm512_storeu_ps, better = >
+);
