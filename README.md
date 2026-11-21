@@ -123,7 +123,7 @@ fn main() {
 
 A filter is two kernels joined by a bitmask: *compare* turns 64 rows into one mask word, *compact* turns a word and 64 rows into the surviving rows.
 
-- **Compare → bitmask** for all ten numeric types, with AVX-512 where the CPU has it and AVX2 otherwise. AVX-512 compares straight into mask registers; with AVX2, three base predicates per type plus a complement cover the six operators and unsigned types use a sign-bit bias. Floats follow a total order (NaN equals NaN and sorts last).
+- **Compare → bitmask** for all ten numeric types, with AVX-512 where the CPU has it and AVX2 otherwise. AVX-512 compares into mask registers and stores them straight into the bitmap (the mask of eight 64-bit lanes is one byte of it); with AVX2, three base predicates per type plus a complement cover the six operators and unsigned types use a sign-bit bias. Floats follow a total order (NaN equals NaN and sorts last).
 - **Compaction without data-dependent branches:** `vpcompress` with AVX-512; with AVX2, table-driven `vpermd` for 4- and 8-byte elements and `pshufb` for 1- and 2-byte elements. 16-byte string views go through the 8-byte kernel with doubled mask bits. The output offsets of all steps of a mask word come from its population counts up front, so no step waits for the previous one.
 - **Sparse stretches use scalar steps** — the density of each group of mask words picks a fixed number of "lowest set bit, copy, clear" steps per word, again without a data-dependent branch.
 - **Fusion** — when predicate and payload are the same column, the two kernels alternate over cache-sized blocks, so each block is compacted while it is still in L1/L2 and the column crosses the memory bus once.

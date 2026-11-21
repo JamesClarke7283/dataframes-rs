@@ -274,9 +274,18 @@ A filter is two kernels joined by a bitmask.
 ### 4.1 Compare → bitmask
 
 - Kernels for all ten numeric types produce one mask word per 64 rows.
-- **AVX-512:** a comparison writes its result to a mask register, so a word
-  is one to eight instructions with no sign-bit extraction; all six operators
-  exist for signed, unsigned and floating-point lanes.
+- **AVX-512:** a comparison writes its result to a mask register, and a mask
+  register is stored to memory as it is: the mask of eight 64-bit lanes *is*
+  one byte of the bitmap. A word is one to eight "load, compare, store the
+  mask" steps with no sign-bit extraction and no detour through a general
+  register — moving a mask there, eight times per word of 64-bit rows, was the
+  slowest step of the obvious loop, and the compiler turned the equally
+  obvious way of joining the eight masks into something slower still (it
+  vectorised the shifts and ORs). The set bits are counted afterwards in one
+  pass over the finished words. All six operators exist for signed, unsigned
+  and floating-point lanes. A mask buffer is cleared by the thread that
+  writes each part of it, not by the caller for everybody, so that a recycled
+  buffer stays in the caches of the cores that use it.
 - **AVX2:** six operators are covered by three vector predicates per type and
   an optional complement of the finished word; unsigned integers are compared
   as signed after flipping the sign bit of both operands.
