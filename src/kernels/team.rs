@@ -42,6 +42,11 @@
 //!   queue: they run their tasks on the calling thread.
 //! * [`warm`] wakes workers without giving them a job, for a caller that
 //!   wants its next job to find them polling.
+//! * On Linux every worker is kept to the hardware threads of one physical
+//!   core, and the first workers to cores other than the one the team was
+//!   started from, so that "one helper" means "a second core" and not "the
+//!   other half of mine". `DATAFRAMES_HOME_CORES=0` leaves the placement to
+//!   the scheduler.
 //!
 //! A panic in a task cancels the tasks not yet claimed and is re-raised on
 //! the caller once all helpers have left.
@@ -165,9 +170,14 @@ pub fn cores() -> usize {
     *CORES.get_or_init(|| count_cores().unwrap_or(usize::MAX).clamp(1, threads()))
 }
 
-/// Distinct cores among the CPUs this process may run on.
-#[cfg(target_os = "linux")]
 fn count_cores() -> Option<usize> {
+    core_sets().map(|cores| cores.len())
+}
+
+/// The CPUs this process may run on, grouped by physical core, in the order
+/// in which the cores first appear.
+#[cfg(target_os = "linux")]
+fn core_sets() -> Option<Vec<Vec<usize>>> {
     // SAFETY: a zeroed CPU set is valid and the call fills at most its size.
     let allowed = unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
@@ -176,7 +186,7 @@ fn count_cores() -> Option<usize> {
         }
         set
     };
-    let mut seen: Vec<String> = Vec::new();
+    let mut cores: Vec<(String, Vec<usize>)> = Vec::new();
     for cpu in 0..libc::CPU_SETSIZE as usize {
         // SAFETY: `cpu` is below the size of the set.
         if !unsafe { libc::CPU_ISSET(cpu, &allowed) } {
@@ -184,17 +194,74 @@ fn count_cores() -> Option<usize> {
         }
         // The same text for every thread of one core, e.g. "0,2" or "4-5".
         let siblings = std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")).ok()?;
-        if !seen.contains(&siblings) {
-            seen.push(siblings);
+        match cores.iter_mut().find(|(key, _)| *key == siblings) {
+            Some((_, cpus)) => cpus.push(cpu),
+            None => cores.push((siblings, vec![cpu])),
         }
     }
-    (!seen.is_empty()).then_some(seen.len())
+    (!cores.is_empty()).then(|| cores.into_iter().map(|(_, cpus)| cpus).collect())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn count_cores() -> Option<usize> {
+fn core_sets() -> Option<Vec<Vec<usize>>> {
     None
 }
+
+/// The CPUs each of `workers` workers is kept to: all hardware threads of
+/// one physical core, its *home*. Empty if workers are left to the scheduler
+/// (`DATAFRAMES_HOME_CORES=0`, a single core, or a system that does not
+/// tell).
+///
+/// The first workers get one core each, starting after the core this thread
+/// — the one that makes the first parallel call — is running on; further
+/// workers go round again, to the second hardware threads. A job that wants
+/// one helper per core therefore finds its helpers on cores other than the
+/// caller's and other than each other's. Left alone, the scheduler places a
+/// woken worker wherever is convenient at that moment, quite often on the
+/// second thread of the caller's own core, where it shares the caller's
+/// cache and adds nothing; measured on the benchmark runners, that alone
+/// decided whether splitting a cache-resident column halved its time or
+/// changed nothing.
+///
+/// A worker may still use either thread of its core, and the calling thread
+/// is never restricted: if it ends up on a worker's core the scheduler is
+/// free to move it away.
+#[cfg(target_os = "linux")]
+fn home_cores(workers: usize) -> Vec<Vec<usize>> {
+    if std::env::var("DATAFRAMES_HOME_CORES").is_ok_and(|v| v.trim() == "0") {
+        return Vec::new();
+    }
+    let Some(cores) = core_sets().filter(|cores| cores.len() >= 2) else {
+        return Vec::new();
+    };
+    // SAFETY: no arguments, no preconditions.
+    let here = unsafe { libc::sched_getcpu() };
+    let base = cores.iter().position(|cpus| cpus.iter().any(|&cpu| cpu as libc::c_int == here)).unwrap_or(0);
+    (0..workers).map(|k| cores[(base + 1 + k) % cores.len()].clone()).collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn home_cores(_workers: usize) -> Vec<Vec<usize>> {
+    Vec::new()
+}
+
+/// Restrict the calling thread to `cpus`. Failure is harmless: the thread
+/// then runs wherever the scheduler puts it.
+#[cfg(target_os = "linux")]
+fn stay_on(cpus: &[usize]) {
+    // SAFETY: a zeroed CPU set is valid, every index is checked against its
+    // size, and the call only reads it.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        for &cpu in cpus.iter().filter(|&&cpu| cpu < libc::CPU_SETSIZE as usize) {
+            libc::CPU_SET(cpu, &mut set);
+        }
+        libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stay_on(_cpus: &[usize]) {}
 
 /// How long an idle worker polls for the next job before it goes to sleep.
 ///
@@ -232,12 +299,17 @@ fn team() -> Option<&'static Team> {
             panicked: AtomicBool::new(false),
             spin: spin_time(),
         });
+        let mut homes = home_cores(wanted).into_iter();
         let mut handles = Vec::with_capacity(wanted);
         for i in 0..wanted {
             let shared = Arc::clone(&shared);
-            let spawned = std::thread::Builder::new()
-                .name(format!("dataframes-{i}"))
-                .spawn(move || worker_main(&shared, i));
+            let home = homes.next();
+            let spawned = std::thread::Builder::new().name(format!("dataframes-{i}")).spawn(move || {
+                if let Some(cpus) = home {
+                    stay_on(&cpus);
+                }
+                worker_main(&shared, i)
+            });
             match spawned {
                 Ok(handle) => handles.push(handle.thread().clone()),
                 // Without this worker the later indices would never be woken
@@ -540,6 +612,29 @@ mod tests {
             }
         });
         assert_eq!(total.load(Ordering::Relaxed), 4 * 50 * 8 * 4);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workers_get_one_home_core_each_before_any_core_gets_two() {
+        let Some(cores) = core_sets() else { return };
+        assert!(cores.iter().all(|cpus| !cpus.is_empty()));
+        assert_eq!(count_cores(), Some(cores.len()));
+        let homes = home_cores(2 * cores.len());
+        if cores.len() < 2 || std::env::var("DATAFRAMES_HOME_CORES").is_ok_and(|v| v.trim() == "0") {
+            assert!(homes.is_empty());
+            return;
+        }
+        assert_eq!(homes.len(), 2 * cores.len());
+        // Every home is one whole core.
+        assert!(homes.iter().all(|home| cores.contains(home)));
+        // The first workers are on distinct cores, and the core the team is
+        // started from is the last one to get a worker.
+        let first = &homes[..cores.len()];
+        assert!(first.iter().enumerate().all(|(i, home)| !first[..i].contains(home)));
+        assert!(homes.iter().zip(&homes[cores.len()..]).all(|(a, b)| a == b));
+        // Staying on one's own CPUs is always allowed.
+        std::thread::spawn(move || stay_on(&homes[0])).join().unwrap();
     }
 
     #[test]
