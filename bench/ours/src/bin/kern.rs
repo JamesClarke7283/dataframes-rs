@@ -279,11 +279,12 @@ fn main() {
     if want("lookup") {
         // A thousand point look-ups at fixed random positions, the same in
         // every call: into a column from the library's allocator (huge pages
-        // from 2 MiB) and into the same data in a plain vector (small pages).
+        // from 2 MiB), into the same data in a plain vector (small pages),
+        // and into a plain mapping that asked for huge pages.
         let positions: Vec<u32> = (0..1000u64).map(|i| ((i * 0x9E37_79B9_7F4A_7C15) >> 11) as u32 % rows as u32).collect();
         let plain: Vec<i64> = a.to_vec();
-        // One copy of the loop for both, so that where the compiler put it
-        // (which alone can cost a third) is the same for both.
+        // One copy of the loop for all, so that where the compiler put it
+        // (which alone can cost a third) is the same for all.
         #[inline(never)]
         fn look(data: &[i64], positions: &[u32]) -> i64 {
             let mut acc = 0i64;
@@ -292,10 +293,58 @@ fn main() {
             }
             acc
         }
-        println!("library column at {:p}, plain vector at {:p}", a.as_ptr(), plain.as_ptr());
-        for round in 0..3 {
+        /// The same without the detour of `unwrap_or`: the load can be part
+        /// of the addition.
+        #[inline(never)]
+        fn look_some(data: &[i64], positions: &[u32]) -> i64 {
+            let mut acc = 0i64;
+            for &i in positions {
+                if let Some(&v) = data.get(black_box(i as usize)) {
+                    acc = acc.wrapping_add(v);
+                }
+            }
+            acc
+        }
+        /// Kilobytes of `data` that sit in huge pages, from the kernel's map.
+        fn huge_kb(data: &[i64]) -> usize {
+            let (lo, hi) = (data.as_ptr() as usize, data.as_ptr() as usize + size_of_val(data));
+            let Ok(maps) = std::fs::read_to_string("/proc/self/smaps") else { return 0 };
+            let (mut inside, mut total) = (false, 0);
+            for line in maps.lines() {
+                let mut parts = line.split_whitespace();
+                let first = parts.next().unwrap_or("");
+                if let Some((start, end)) = first.split_once('-')
+                    && let (Ok(start), Ok(end)) = (usize::from_str_radix(start, 16), usize::from_str_radix(end, 16))
+                {
+                    inside = start < hi && end > lo;
+                } else if inside && first == "AnonHugePages:" {
+                    total += parts.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+                }
+            }
+            total
+        }
+        // A mapping of its own, aligned to 2 MiB, with the request for huge
+        // pages that the library's allocator makes.
+        let bytes = (rows * 8).next_multiple_of(2 << 20);
+        // SAFETY: an anonymous private mapping; checked below; never unmapped.
+        let advised: &mut [i64] = unsafe {
+            let raw = libc::mmap(std::ptr::null_mut(), bytes + (2 << 20), libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
+            assert!(raw != libc::MAP_FAILED);
+            let start = (raw as usize).next_multiple_of(2 << 20) as *mut libc::c_void;
+            libc::madvise(start, bytes, libc::MADV_HUGEPAGE);
+            std::slice::from_raw_parts_mut(start.cast::<i64>(), rows)
+        };
+        advised.copy_from_slice(&a);
+        println!(
+            "library column at {:p} ({} KiB huge), plain vector at {:p} ({} KiB huge), advised mapping at {:p} ({} KiB huge)",
+            a.as_ptr(), huge_kb(&a), plain.as_ptr(), huge_kb(&plain), advised.as_ptr(), huge_kb(advised)
+        );
+        for round in 0..2 {
             report(&format!("1000 look-ups, library column ({round})"), 1000, time(|| look(black_box(&a), &positions)));
             report(&format!("1000 look-ups, plain vector ({round})"), 1000, time(|| look(black_box(&plain), &positions)));
+            report(&format!("1000 look-ups, advised mapping ({round})"), 1000, time(|| look(black_box(advised), &positions)));
+            report(&format!("1000 look-ups, library column, if-let ({round})"), 1000, time(|| look_some(black_box(&a), &positions)));
+            report(&format!("1000 look-ups, plain vector, if-let ({round})"), 1000, time(|| look_some(black_box(&plain), &positions)));
         }
     }
     if want("filter") {
