@@ -15,12 +15,10 @@ use arrow_arith::aggregate::{max, min, sum};
 use arrow_arith::boolean::and;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch, StringViewArray,
-    UInt32Array,
 };
 use arrow_ord::cmp::lt;
 use arrow_schema::{DataType, Field, Schema};
 use arrow_select::filter::{filter, filter_record_batch};
-use arrow_select::take::take;
 use bench_common::{Dataset, Opts, Suite, vocab};
 
 fn batch(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
@@ -148,17 +146,6 @@ fn main() {
                 acc = acc.wrapping_add(if e.is_valid(i) { e.value(i) } else { 0 });
             }
             acc
-        },
-        |acc| acc as f64,
-    );
-    // The same question asked once instead of a thousand times: the values at
-    // those positions as an array (the `take` kernel), and their sum.
-    let positions = UInt32Array::from(ds.lookups.clone());
-    suite.bench(
-        "get_random_1k@take",
-        || {
-            let out = take(&e, black_box(&positions), None).unwrap();
-            sum(out.as_any().downcast_ref::<Int64Array>().unwrap()).unwrap_or(0)
         },
         |acc| acc as f64,
     );

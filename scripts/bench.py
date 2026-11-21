@@ -7,17 +7,23 @@
 `run` executes one driver per library, several rounds, round-robin, so that
 frequency scaling and noisy neighbours hit every library alike, and appends
 raw records to a JSON-lines file. `report` reduces them to one number per
-(library, case, size) - the best median over rounds and over the variants a
-library offers for that case - checks that all libraries computed the same
-thing, and writes a Markdown table, a JSON summary and an SVG chart. With
-`--readme FILE` it also refreshes the block between the `bench:start` and
-`bench:end` markers of that file.
+(library, case, size) - for each spelling ("variant") a library offers for a
+case, the mean over the rounds of the round's median; then the fastest
+spelling - checks that all libraries computed the same thing, and writes a
+Markdown table, a JSON summary and an SVG chart. With `--readme FILE` it
+also refreshes the block between the `bench:start` and `bench:end` markers
+of that file.
 
-A comparison counts as a win when dataframes is more than `--tie` (default
-5 %, about what identical code varies by between two processes on a shared
-cloud machine) faster than the fastest competitor, as level when the two are
-within that band of each other, and as a loss otherwise. `--gate` fails on losses
-and on results that disagree between libraries.
+Every round is a fresh process, and the mean over the rounds is what is
+reported, not the best round: the same binary can be half as fast again from
+one process to the next (where the loader puts it, where its buffers land),
+and what a user gets is the average of that.
+
+Leads and deficits of less than `--tie` (default 5 %, about what identical
+code varies by between two runs on a shared cloud machine) are reported as
+such: "faster by less than 5 %" is not folded into the wins, nor "behind by
+less than 5 %" into the losses. `--gate` fails on losses and on results that
+disagree between libraries.
 
 Only the Python standard library is used.
 """
@@ -71,7 +77,7 @@ CASE_TITLES = {
     "slice_frame": "slice 6-column frame (zero-copy)",
     "head_frame": "head(10) of 6-column frame",
     "slice_series": "slice one column (zero-copy)",
-    "get_random_1k": "the values at 1000 random positions of a column",
+    "get_random_1k": "1000 random point look-ups in a column",
     "cell_random_1k": "1000 random cell look-ups by column name",
     "sum_i64": "sum of i64 column",
     "sum_f64": "sum of f64 column",
@@ -226,23 +232,36 @@ def summarise(best):
 
 
 def verdict(entry, tie):
-    """'win', 'level' or 'loss' for one comparison: more than `tie` faster
-    than the fastest competitor, within `tie` of it, or more than `tie` slower."""
+    """How one comparison went, from the fastest competitor's time over ours:
+
+    'win'    - more than `tie` faster than the fastest competitor;
+    'ahead'  - faster, by less than `tie`;
+    'behind' - slower, by less than `tie`;
+    'loss'   - more than `tie` slower.
+    """
     speedup = entry["speedup"]
     if speedup >= 1.0 + tie:
         return "win"
-    return "level" if speedup > 1.0 - tie else "loss"
+    if speedup >= 1.0:
+        return "ahead"
+    return "behind" if speedup > 1.0 - tie else "loss"
 
 
 def headline(summary, tie):
-    speedups = [s["speedup"] for s in summary if s["speedup"]]
-    kinds = [verdict(s, tie) for s in summary if s["speedup"]]
-    wins, level, losses = kinds.count("win"), kinds.count("level"), kinds.count("loss")
+    counted = [s for s in summary if s["speedup"]]
+    speedups = [s["speedup"] for s in counted]
+    kinds = [verdict(s, tie) for s in counted]
+    wins, ahead, behind, losses = (kinds.count(k) for k in ("win", "ahead", "behind", "loss"))
     geo = math.exp(sum(math.log(x) for x in speedups) / len(speedups)) if speedups else float("nan")
-    text = f"**dataframes is the fastest library in {wins} of {len(speedups)} comparisons**"
-    if level:
-        text += f", level with the fastest (within {tie:.0%}) in {level}"
-    text += f" and slower in {losses}" if losses else " and slower in none"
+    if not behind and not losses:
+        text = f"**dataframes is the fastest library in all {len(speedups)} comparisons**"
+        text += f": by more than {tie:.0%} in {wins}, by less in {ahead}" if ahead else f", by more than {tie:.0%} in each"
+    else:
+        text = f"**dataframes is the fastest library in {wins + ahead} of {len(speedups)} comparisons**"
+        text += f" (by more than {tie:.0%} in {wins})"
+        if behind:
+            text += f", behind the fastest by less than {tie:.0%} in {behind}"
+        text += f" and slower in {losses}" if losses else " and more than that in none"
     text += (f". Geometric-mean speed-up over the fastest competitor: **{geo:.2f}x** "
              f"(smallest {min(speedups):.2f}x, largest {max(speedups):.2f}x).")
     return text
@@ -282,7 +301,7 @@ def markdown(summary, meta, tie):
                 cell = "-"
             else:
                 mark = "" if s["checks_agree"] else " ⚠ results differ"
-                note = {"win": "", "level": " level", "loss": " slower"}[verdict(s, tie)]
+                note = {"win": "", "ahead": "", "behind": " behind", "loss": " slower"}[verdict(s, tie)]
                 cell = f"**{s['speedup']:.2f}x**{note} ({LIB_TITLES[s['fastest_rival']]}){mark}"
             lines.append(f"| {CASE_TITLES[s['case']]} | " + " | ".join(cells) + f" | {cell} |")
     return "\n".join(lines) + "\n"
@@ -302,10 +321,10 @@ def svg_chart(summary, rows, tie):
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
         f'font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12">',
-        "<style>.t{fill:#1f2328}.m{fill:#59636e}.g{stroke:#d1d9e0}.b{fill:#1f6feb}.l{fill:#cf222e}.e{fill:#9a6700}"
-        "@media(prefers-color-scheme:dark){.t{fill:#f0f6fc}.m{fill:#9198a1}.g{stroke:#3d444d}.b{fill:#4493f8}.l{fill:#f85149}.e{fill:#d29922}}</style>",
+        "<style>.t{fill:#1f2328}.m{fill:#59636e}.g{stroke:#d1d9e0}.b{fill:#1f6feb}.l{fill:#cf222e}.e{fill:#9a6700}.u{fill:#8c959f}"
+        "@media(prefers-color-scheme:dark){.t{fill:#f0f6fc}.m{fill:#9198a1}.g{stroke:#3d444d}.b{fill:#4493f8}.l{fill:#f85149}.e{fill:#d29922}.u{fill:#6e7681}}</style>",
         f'<text class="t" x="0" y="18" font-size="15" font-weight="600">Speed-up over the fastest competitor - {fmt_rows(rows)} rows</text>',
-        f'<text class="m" x="0" y="36">competitor time / dataframes time, log scale; 1x = parity</text>',
+        f'<text class="m" x="0" y="36">competitor time / dataframes time, log scale; 1x = parity; grey = ahead by less than {tie:.0%}</text>',
     ]
     tick = 0.5
     ticks = []
@@ -321,7 +340,7 @@ def svg_chart(summary, rows, tie):
     for i, s in enumerate(items):
         y = top + i * row_h
         x = label_w + scale(s["speedup"])
-        cls = {"win": "b", "level": "e", "loss": "l"}[verdict(s, tie)]
+        cls = {"win": "b", "ahead": "u", "behind": "e", "loss": "l"}[verdict(s, tie)]
         out.append(f'<text class="t" x="{label_w - 8}" y="{y + 14}" text-anchor="end">{CASE_TITLES[s["case"]].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")}</text>')
         out.append(f'<rect class="{cls}" x="{min(one, x):.1f}" y="{y + 3}" width="{max(abs(x - one), 2.0):.1f}" height="{row_h - 8}" rx="2"/>')
         out.append(f'<text class="t" x="{max(one, x) + 6:.1f}" y="{y + 14}">{s["speedup"]:.2f}x</text>')
@@ -410,14 +429,13 @@ def report(args):
     print(md)
 
     losses = [s for s in summary if s["verdict"] == "loss"]
-    level = [s for s in summary if s["verdict"] == "level"]
     mismatches = [s for s in summary if not s["checks_agree"]]
     for s in mismatches:
         print(f"CHECK MISMATCH {fmt_rows(s['rows'])} {s['case']}", file=sys.stderr)
-    for s in level:
-        print(f"LEVEL {fmt_rows(s['rows'])} {s['case']}: {s['speedup']:.2f}x vs {s['fastest_rival']}", file=sys.stderr)
-    for s in losses:
-        print(f"SLOWER {fmt_rows(s['rows'])} {s['case']}: {s['speedup']:.2f}x vs {s['fastest_rival']}", file=sys.stderr)
+    for label, kind in (("NARROW", "ahead"), ("BEHIND", "behind"), ("SLOWER", "loss")):
+        for s in summary:
+            if s["verdict"] == kind:
+                print(f"{label} {fmt_rows(s['rows'])} {s['case']}: {s['speedup']:.2f}x vs {s['fastest_rival']}", file=sys.stderr)
     if args.gate and (losses or mismatches):
         sys.exit(1)
 
@@ -443,7 +461,7 @@ def main():
     t.add_argument("--out-dir", default=str(RESULTS))
     t.add_argument("--name", default="latest")
     t.add_argument("--gate", action="store_true", help="exit 1 if dataframes is slower than a competitor anywhere")
-    t.add_argument("--tie", type=float, default=0.05, help="relative difference below which two libraries count as level")
+    t.add_argument("--tie", type=float, default=0.05, help="relative lead or deficit below which a result is reported as narrow rather than as a win or a loss")
     t.add_argument("--readme", default=None, help="README whose bench:start/bench:end block to refresh")
     t.set_defaults(func=report)
     args = p.parse_args()

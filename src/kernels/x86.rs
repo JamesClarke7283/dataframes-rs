@@ -873,7 +873,10 @@ pub unsafe fn gather_stream<T: Copy>(src: *const T, idx: &[u32], out: *mut T) {
         let mut fill = dst.fill;
         for batch in idx.chunks(BATCH) {
             for &i in batch {
-                stage.add(fill).cast::<T>().write_unaligned(src.add(i as usize).read());
+                // A volatile read: one ordinary load per element, which the
+                // compiler must not merge into a vector gather (see
+                // `arith::take`).
+                stage.add(fill).cast::<T>().write_unaligned(src.add(i as usize).read_volatile());
                 fill += size;
             }
             if fill >= STAGE_BYTES {
