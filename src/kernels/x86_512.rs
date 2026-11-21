@@ -57,13 +57,18 @@ macro_rules! cmp_scalar_int {
                     // SAFETY: word `i` is fully inside `values`; `i < out.len()`.
                     unsafe {
                         let p = values.as_ptr().add(i * 64);
+                        // The masks are chained from the last vector to the
+                        // first (`w = w << LANES | m`). Written as independent
+                        // `m << shift` terms, the compiler vectorises the
+                        // combination itself and the detour through vector
+                        // registers costs more than the comparisons.
                         let mut w = 0u64;
-                        let mut k = 0;
-                        while k < 64 / LANES {
+                        let mut k = 64 / LANES;
+                        while k > 0 {
+                            k -= 1;
                             let v = _mm512_loadu_si512(p.add(k * LANES).cast());
                             let m = if U { $cmp_u::<P>(v, r) as u64 } else { $cmp_s::<P>(v, r) as u64 };
-                            w |= m << (k * LANES % 64);
-                            k += 1;
+                            w = if LANES == 64 { m } else { (w << (LANES % 64)) | m };
                         }
                         *out.get_unchecked_mut(i) = w;
                         count += w.count_ones() as usize;
@@ -131,12 +136,14 @@ macro_rules! cmp_scalar_float {
                     // SAFETY: word `i` is fully inside `values`; `i < out.len()`.
                     unsafe {
                         let p = values.as_ptr().add(i * 64);
+                        // Chained from the last vector to the first; see the
+                        // integer kernels.
                         let mut w = 0u64;
-                        let mut k = 0;
-                        while k < 64 / LANES {
+                        let mut k = 64 / LANES;
+                        while k > 0 {
+                            k -= 1;
                             let v = $load(p.add(k * LANES));
-                            w |= ($cmp::<P>(v, r) as u64) << (k * LANES);
-                            k += 1;
+                            w = (w << LANES) | $cmp::<P>(v, r) as u64;
                         }
                         *out.get_unchecked_mut(i) = w;
                         count += w.count_ones() as usize;
