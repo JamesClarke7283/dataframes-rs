@@ -416,6 +416,66 @@ fn main() {
             report(&format!("1000 look-ups, library column, or-zero, cold miss ({round})"), 1000, time(|| look_or_cold(black_box(&a), &positions)));
         }
     }
+    if want("gather") {
+        // Shapes of the loop inside `take`, into a buffer that exists
+        // already, to see what the loop itself costs and what its stores do.
+        let positions: Vec<u32> = (0..1000u64).map(|i| ((i * 0x9E37_79B9_7F4A_7C15) >> 11) as u32 % rows as u32).collect();
+        let mut out = vec![0i64; positions.len()];
+        #[inline(never)]
+        fn one_by_one(src: &[i64], idx: &[u32], out: &mut [i64]) {
+            for (o, &i) in out.iter_mut().zip(idx) {
+                // SAFETY: the positions are below the length.
+                *o = unsafe { src.as_ptr().add(i as usize).read_volatile() };
+            }
+        }
+        #[inline(never)]
+        fn by_fours(src: &[i64], idx: &[u32], out: &mut [i64]) {
+            let p = src.as_ptr();
+            for (o, i) in out.chunks_exact_mut(4).zip(idx.chunks_exact(4)) {
+                // SAFETY: as above.
+                unsafe {
+                    let (a, b, c, d) = (
+                        p.add(i[0] as usize).read_volatile(),
+                        p.add(i[1] as usize).read_volatile(),
+                        p.add(i[2] as usize).read_volatile(),
+                        p.add(i[3] as usize).read_volatile(),
+                    );
+                    (o[0], o[1], o[2], o[3]) = (a, b, c, d);
+                }
+            }
+        }
+        #[inline(never)]
+        fn by_eights(src: &[i64], idx: &[u32], out: &mut [i64]) {
+            let p = src.as_ptr();
+            for (o, i) in out.chunks_exact_mut(8).zip(idx.chunks_exact(8)) {
+                let mut v = [0i64; 8];
+                for k in 0..8 {
+                    // SAFETY: as above.
+                    v[k] = unsafe { p.add(i[k] as usize).read_volatile() };
+                }
+                o.copy_from_slice(&v);
+            }
+        }
+        #[inline(never)]
+        fn sum_only(src: &[i64], idx: &[u32]) -> i64 {
+            let p = src.as_ptr();
+            let mut acc = [0i64; 4];
+            for i in idx.chunks_exact(4) {
+                for k in 0..4 {
+                    // SAFETY: as above.
+                    acc[k] = acc[k].wrapping_add(unsafe { p.add(i[k] as usize).read_volatile() });
+                }
+            }
+            acc.iter().fold(0i64, |a, &b| a.wrapping_add(b))
+        }
+        for round in 0..2 {
+            report(&format!("gather, one by one ({round})"), 1000, time(|| one_by_one(black_box(&a), &positions, &mut out)));
+            report(&format!("gather, by fours ({round})"), 1000, time(|| by_fours(black_box(&a), &positions, &mut out)));
+            report(&format!("gather, by eights ({round})"), 1000, time(|| by_eights(black_box(&a), &positions, &mut out)));
+            report(&format!("sum at positions, no output ({round})"), 1000, time(|| sum_only(black_box(&a), &positions)));
+        }
+        black_box(&out);
+    }
     if want("take") {
         // The values at a thousand positions in one call: the kernel alone,
         // and the pieces around it that a column-level `take` adds.
