@@ -1,0 +1,24 @@
+[package]
+name = "bench-polars"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Benchmark driver for the Polars Rust crate (competitor baseline)."
+
+[dependencies]
+bench-common = { path = "../common" }
+polars = { version = "0.55.2", default-features = false, features = [
+    "lazy",
+    "performant",
+    "streaming",
+    "fmt",
+    "zip_with",
+    "dtype-i8",
+    "dtype-i16",
+    "dtype-u8",
+    "dtype-u16",
+] }
+mimalloc = { version = "0.1", default-features = false, optional = true }
+
+[features]
+default = ["mimalloc"]

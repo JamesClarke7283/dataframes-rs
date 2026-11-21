@@ -1,0 +1,14 @@
+[package]
+name = "bench-ours"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Benchmark driver for dataframes (this repository)."
+
+[dependencies]
+bench-common = { path = "../common" }
+dataframes = { path = "../.." }
+mimalloc = { version = "0.1", default-features = false, optional = true }
+
+[features]
+default = ["mimalloc"]

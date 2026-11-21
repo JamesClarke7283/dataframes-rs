@@ -1,0 +1,42 @@
+[package]
+name = "dataframes"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+description = "Zero-copy columnar dataframes: allocator-backed cache-aligned columns, SIMD-accelerated filtering, O(1) smart-pointer slicing and snapshot-isolated concurrent mutation, behind a Polars- and pandas-style API."
+repository = "https://github.com/JamesClarke7283/dataframes-rs"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/dataframes"
+keywords = ["dataframe", "columnar", "simd", "zero-copy", "polars"]
+categories = ["data-structures", "science", "concurrency"]
+exclude = ["/bench", "/.github", "/scripts", "/docs"]
+
+[dependencies]
+rayon = "1.12"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[workspace]
+members = [".", "bench/common", "bench/ours", "bench/polars", "bench/arrow"]
+default-members = ["."]
+resolver = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = false
+panic = "unwind"
+
+# The library's kernels are generic over the element type and dispatch on CPU
+# features at run time; a single codegen unit keeps them inlinable into each other.
+[profile.release.package.dataframes]
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.test]
+opt-level = 1

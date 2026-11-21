@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.100.0"
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Portable build: the vector kernels are selected at run time.
+          - name: x86-64, runtime dispatch
+            os: ubuntu-latest
+            rustflags: ""
+            simd: auto
+          # Everything compiled for the host CPU, as the benchmarks are.
+          - name: x86-64, target-cpu=native
+            os: ubuntu-latest
+            rustflags: "-C target-cpu=native"
+            simd: auto
+          # The portable reference kernels, which the vector ones are checked against.
+          - name: x86-64, scalar kernels
+            os: ubuntu-latest
+            rustflags: ""
+            simd: scalar
+          # No x86 intrinsics at all.
+          - name: aarch64
+            os: ubuntu-24.04-arm
+            rustflags: ""
+            simd: auto
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Unit and doc tests (debug assertions on)
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          RUSTDOCFLAGS: ${{ matrix.rustflags }}
+          DATAFRAMES_SIMD: ${{ matrix.simd }}
+        run: cargo test
+      - name: Unit tests (release)
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          DATAFRAMES_SIMD: ${{ matrix.simd }}
+        run: cargo test --release --lib
+
+  lint:
+    name: clippy, docs, package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Clippy
+        run: cargo clippy --all-targets
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps
+      - name: Package
+        run: cargo package --locked --allow-dirty

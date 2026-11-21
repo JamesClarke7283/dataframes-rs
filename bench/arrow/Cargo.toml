@@ -1,0 +1,19 @@
+[package]
+name = "bench-arrow"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Benchmark driver for Apache Arrow (arrow-rs) compute kernels (competitor baseline)."
+
+[dependencies]
+bench-common = { path = "../common" }
+arrow-array = "60.1"
+arrow-buffer = "60.1"
+arrow-schema = "60.1"
+arrow-select = "60.1"
+arrow-ord = "60.1"
+arrow-arith = "60.1"
+mimalloc = { version = "0.1", default-features = false, optional = true }
+
+[features]
+default = ["mimalloc"]
