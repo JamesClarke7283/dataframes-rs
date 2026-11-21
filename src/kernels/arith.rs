@@ -2,8 +2,8 @@
 //!
 //! The closures passed in are ordinary Rust; [`with_simd`] re-instantiates the
 //! loop around them inside a `#[target_feature]` frame so LLVM vectorises them
-//! with 256-bit registers when the CPU has them. Large inputs are split across
-//! the memory-bound worker set.
+//! with 256-bit registers when the CPU has them. Inputs of a few hundred
+//! kilobytes and more are split across the team.
 
 use std::mem::MaybeUninit;
 
