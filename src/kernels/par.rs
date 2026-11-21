@@ -35,8 +35,10 @@
 //! So the policy measures instead of guessing. For each size class it keeps
 //! one decision — split or not. It starts as "not" for an input that fits in
 //! the private cache (it may well be there) and as "split" for a larger one.
-//! Every so often the policy times six calls as they are, runs the next
-//! eight the other way (two to move the data, six timed; see [`Plan`]), and
+//! Every so often the policy times six calls as they are, then runs the
+//! other way for a moment untimed (two calls to move the data and, if the
+//! helpers had been asleep, 200 µs for their cores to come back up to
+//! speed), times six calls that way (see [`Plan`]), and
 //! changes its mind if the typical kernel call took at least a ninth less
 //! time that way (a thirty-second is enough for the way back to where it
 //! started) *and* the caller's whole cycle, from one call to the next, did
@@ -212,6 +214,11 @@ const TRIAL_SKIP: u8 = 2;
 /// Calls a trial of splitting waits for the helpers to wake up (they need
 /// tens of microseconds, and a call can take less than one).
 const WARM_CALLS: u32 = 512;
+/// How long a trial of splitting runs before it is timed. A helper that was
+/// asleep sits on a core that has slowed down, or lost its cache, and takes a
+/// moment to be worth what it will be worth: measured too early, a split
+/// that halves the time looked slower than no split.
+const WARM_NANOS: u64 = 200_000;
 /// "Not measured" in [`Lane::kernel`] and [`Lane::cycle`].
 const UNKNOWN: u32 = u32::MAX;
 
@@ -259,6 +266,8 @@ struct Lane {
     cycle: [[AtomicU32; WINDOW as usize]; 2],
     /// When the previous call of the window started; 0 at its beginning.
     last_start: AtomicU64,
+    /// When the trial began.
+    trial_start: AtomicU64,
 }
 
 /// What a call asks of its lane.
@@ -282,6 +291,7 @@ impl Lane {
             kernel: [const { [const { AtomicU32::new(UNKNOWN) }; WINDOW as usize] }; 2],
             cycle: [const { [const { AtomicU32::new(UNKNOWN) }; WINDOW as usize] }; 2],
             last_start: AtomicU64::new(0),
+            trial_start: AtomicU64::new(0),
         }
     }
 
@@ -326,6 +336,7 @@ impl Lane {
         if phase == WARMING {
             if team::helpers_awake(parts - 1) {
                 (phase, left) = (TRIAL, TRIAL_SKIP + WINDOW);
+                self.trial_start.store(now_nanos(), R);
             } else if calls >= self.period.load(R).saturating_add(WARM_CALLS) {
                 // Calls too far apart for the helpers to stay awake between
                 // them: there is nothing to try.
@@ -344,13 +355,23 @@ impl Lane {
             phase = STEADY;
         }
 
+        // Inside a window every call notes when it started.
+        let start = if phase == BASELINE || phase == TRIAL { now_nanos().max(1) } else { 0 };
         let (want_split, timed, trial) = match phase {
             BASELINE => {
                 left = left.saturating_sub(1);
                 (split, true, false)
             }
             TRIAL => {
-                left = left.saturating_sub(1);
+                // The last untimed call of a trial of splitting repeats
+                // until the helpers have been at it for a while.
+                let warming = !split
+                    && left == WINDOW + 1
+                    && start.saturating_sub(self.trial_start.load(R)) < WARM_NANOS
+                    && calls < self.period.load(R).saturating_add(2 * WARM_CALLS);
+                if !warming {
+                    left = left.saturating_sub(1);
+                }
                 (!split, left < WINDOW, true)
             }
             _ => (split, false, false),
@@ -380,10 +401,8 @@ impl Lane {
         if phase != BASELINE && phase != TRIAL {
             return Plan::fixed(tasks);
         }
-        // Inside a window every call notes when it started; the timed ones
-        // also report. A call that could not run the way it was meant to
-        // says nothing.
-        let start = now_nanos().max(1);
+        // The timed calls of a window report. A call that could not run the
+        // way it was meant to says nothing.
         let previous = self.last_start.swap(start, R);
         let timed = timed && (tasks > 1) == want_split;
         let slot = usize::from(left).min(WINDOW as usize - 1);

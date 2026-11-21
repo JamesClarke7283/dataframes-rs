@@ -4,9 +4,14 @@
 //! instructions AVX-512 has for exactly these jobs:
 //!
 //! * **compare → bitmask**: a comparison writes its result to a mask register,
-//!   so 64 rows become one word in one to eight instructions with no
-//!   sign-bit extraction, and all six operators exist for signed, unsigned
-//!   and floating-point lanes.
+//!   and a mask register can be stored to memory as it is: the mask of eight
+//!   64-bit lanes is one byte of the bitmap. 64 rows become one word in one
+//!   to eight "load, compare, store the mask" steps, with no sign-bit
+//!   extraction and no detour through a general register (moving a mask
+//!   there is the slowest step of the obvious loop — one a cycle at best, and
+//!   eight per word of 64-bit rows). The set bits are counted afterwards, in
+//!   one pass over the finished words. All six operators exist for signed,
+//!   unsigned and floating-point lanes.
 //! * **compaction**: `vpcompress*` packs the selected lanes of a register to
 //!   its front. A mask word of 64 rows is one to eight "load, compress, store"
 //!   steps whose output offsets are known up front. The compressed register is
@@ -34,6 +39,45 @@ use super::x86::{
 // compare → bitmask
 // ---------------------------------------------------------------------------
 
+/// Store a comparison mask at `dst`: the mask of the lanes `8 * k..` of a
+/// word is byte `k..` of that word on a little-endian machine.
+///
+/// # Safety
+/// `dst` must be valid for writing `size_of::<M>()` bytes.
+#[inline(always)]
+unsafe fn store_mask<M: Copy>(dst: *mut u8, mask: M) {
+    // SAFETY: the caller's contract; a mask type has no padding.
+    unsafe { dst.cast::<M>().write_unaligned(mask) }
+}
+
+/// Number of set bits in `words`.
+///
+/// # Safety
+/// The CPU must support POPCNT.
+#[inline]
+#[target_feature(enable = "popcnt")]
+unsafe fn count_ones(words: &[u64]) -> usize {
+    if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vpopcntdq") {
+        // SAFETY: both features were just detected.
+        return unsafe { count_ones_vector(words) };
+    }
+    words.iter().map(|w| w.count_ones() as usize).sum()
+}
+
+/// [`count_ones`], eight words per step.
+#[target_feature(enable = "avx512f,avx512vpopcntdq,popcnt")]
+unsafe fn count_ones_vector(words: &[u64]) -> usize {
+    let mut total = _mm512_setzero_si512();
+    let mut chunks = words.chunks_exact(8);
+    for chunk in &mut chunks {
+        // SAFETY: the chunk holds exactly eight words.
+        let v = unsafe { _mm512_loadu_si512(chunk.as_ptr().cast()) };
+        total = _mm512_add_epi64(total, _mm512_popcnt_epi64(v));
+    }
+    let rest: usize = chunks.remainder().iter().map(|w| w.count_ones() as usize).sum();
+    _mm512_reduce_add_epi64(total) as usize + rest
+}
+
 macro_rules! cmp_scalar_int {
     ($(#[$doc:meta])* $name:ident, $t:ty, set1 = $set1:ident, signed = $cmp_s:ident, unsigned = $cmp_u:ident, lanes = $lanes:expr) => {
         $(#[$doc])*
@@ -42,40 +86,40 @@ macro_rules! cmp_scalar_int {
         /// word each. Returns the number of set bits.
         ///
         /// # Safety
-        /// The CPU must support AVX-512 F and BW and POPCNT, `values.len()`
-        /// must be a multiple of 64 and `out.len()` at least `values.len() / 64`.
-        #[target_feature(enable = "avx512f,avx512bw,popcnt")]
+        /// The CPU must support AVX-512 F, BW and DQ and POPCNT,
+        /// `values.len()` must be a multiple of 64 and `out.len()` at least
+        /// `values.len() / 64`.
+        #[target_feature(enable = "avx512f,avx512bw,avx512dq,popcnt")]
         pub unsafe fn $name<const U: bool>(values: &[$t], rhs: $t, op: CmpOp, out: &mut [u64]) -> usize {
             #[inline]
-            #[target_feature(enable = "avx512f,avx512bw,popcnt")]
+            #[target_feature(enable = "avx512f,avx512bw,avx512dq,popcnt")]
             unsafe fn run<const P: i32, const U: bool>(values: &[$t], r: __m512i, out: &mut [u64]) -> usize {
                 const LANES: usize = $lanes;
                 let words = values.len() / 64;
-                let mut count = 0usize;
+                let bytes = out.as_mut_ptr().cast::<u8>();
                 let mut i = 0;
                 while i < words {
-                    // SAFETY: word `i` is fully inside `values`; `i < out.len()`.
+                    // SAFETY: word `i` is fully inside `values` and
+                    // `i < out.len()`; vector `k` of the word owns bytes
+                    // `k * LANES / 8..` of it.
                     unsafe {
                         let p = values.as_ptr().add(i * 64);
-                        // The masks are chained from the last vector to the
-                        // first (`w = w << LANES | m`). Written as independent
-                        // `m << shift` terms, the compiler vectorises the
-                        // combination itself and the detour through vector
-                        // registers costs more than the comparisons.
-                        let mut w = 0u64;
-                        let mut k = 64 / LANES;
-                        while k > 0 {
-                            k -= 1;
+                        let word = bytes.add(i * 8);
+                        let mut k = 0;
+                        while k < 64 / LANES {
                             let v = _mm512_loadu_si512(p.add(k * LANES).cast());
-                            let m = if U { $cmp_u::<P>(v, r) as u64 } else { $cmp_s::<P>(v, r) as u64 };
-                            w = if LANES == 64 { m } else { (w << (LANES % 64)) | m };
+                            if U {
+                                store_mask(word.add(k * LANES / 8), $cmp_u::<P>(v, r));
+                            } else {
+                                store_mask(word.add(k * LANES / 8), $cmp_s::<P>(v, r));
+                            }
+                            k += 1;
                         }
-                        *out.get_unchecked_mut(i) = w;
-                        count += w.count_ones() as usize;
                     }
                     i += 1;
                 }
-                count
+                // SAFETY: POPCNT is enabled; `words <= out.len()`.
+                unsafe { count_ones(out.get_unchecked(..words)) }
             }
             debug_assert!(values.len() % 64 == 0 && out.len() >= values.len() / 64);
             let r = $set1(rhs);
@@ -121,36 +165,33 @@ macro_rules! cmp_scalar_float {
         /// the signature in line with the integer kernels.)
         ///
         /// # Safety
-        /// The CPU must support AVX-512 F and BW and POPCNT, `values.len()`
-        /// must be a multiple of 64 and `out.len()` at least `values.len() / 64`.
-        #[target_feature(enable = "avx512f,avx512bw,popcnt")]
+        /// The CPU must support AVX-512 F, BW and DQ and POPCNT,
+        /// `values.len()` must be a multiple of 64 and `out.len()` at least
+        /// `values.len() / 64`.
+        #[target_feature(enable = "avx512f,avx512bw,avx512dq,popcnt")]
         pub unsafe fn $name<const U: bool>(values: &[$t], rhs: $t, op: CmpOp, out: &mut [u64]) -> usize {
             #[inline]
-            #[target_feature(enable = "avx512f,avx512bw,popcnt")]
+            #[target_feature(enable = "avx512f,avx512bw,avx512dq,popcnt")]
             unsafe fn run<const P: i32>(values: &[$t], r: $vec, out: &mut [u64]) -> usize {
                 const LANES: usize = $lanes;
                 let words = values.len() / 64;
-                let mut count = 0usize;
+                let bytes = out.as_mut_ptr().cast::<u8>();
                 let mut i = 0;
                 while i < words {
-                    // SAFETY: word `i` is fully inside `values`; `i < out.len()`.
+                    // SAFETY: as in the integer kernels.
                     unsafe {
                         let p = values.as_ptr().add(i * 64);
-                        // Chained from the last vector to the first; see the
-                        // integer kernels.
-                        let mut w = 0u64;
-                        let mut k = 64 / LANES;
-                        while k > 0 {
-                            k -= 1;
-                            let v = $load(p.add(k * LANES));
-                            w = (w << LANES) | $cmp::<P>(v, r) as u64;
+                        let word = bytes.add(i * 8);
+                        let mut k = 0;
+                        while k < 64 / LANES {
+                            store_mask(word.add(k * LANES / 8), $cmp::<P>($load(p.add(k * LANES)), r));
+                            k += 1;
                         }
-                        *out.get_unchecked_mut(i) = w;
-                        count += w.count_ones() as usize;
                     }
                     i += 1;
                 }
-                count
+                // SAFETY: POPCNT is enabled; `words <= out.len()`.
+                unsafe { count_ones(out.get_unchecked(..words)) }
             }
             debug_assert!(values.len() % 64 == 0 && out.len() >= values.len() / 64 && !rhs.is_nan());
             let r = $set1(rhs);
