@@ -7,6 +7,12 @@
 //! library: it splits one sum between two pinned threads with the smallest
 //! possible hand-off, which shows what a second core can give for an input
 //! that already sits in the first core's cache.
+// The allocator of the benchmark drivers, so that "a plain vector" here is
+// what a competitor's buffer is there.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
@@ -339,12 +345,23 @@ fn main() {
             "library column at {:p} ({} KiB huge), plain vector at {:p} ({} KiB huge), advised mapping at {:p} ({} KiB huge)",
             a.as_ptr(), huge_kb(&a), plain.as_ptr(), huge_kb(&plain), advised.as_ptr(), huge_kb(advised)
         );
+        // The same column again, starting somewhere in the middle of a huge
+        // page instead of at its beginning.
+        let mut shifted_block: AlignedVec<i64> = dataframes::memory::zeroed_vec(rows + (1 << 18));
+        let shift = 123_457.min(shifted_block.len() - rows);
+        shifted_block[shift..shift + rows].copy_from_slice(&a);
+        let shifted = &shifted_block[shift..shift + rows];
+        // A column short enough for every looked-up line to stay in the
+        // first-level cache: what the loop costs when nothing misses.
+        let tiny = &a[..rows.min(2048)];
+        let tiny_positions: Vec<u32> = positions.iter().map(|&p| p % tiny.len() as u32).collect();
         for round in 0..2 {
             report(&format!("1000 look-ups, library column ({round})"), 1000, time(|| look(black_box(&a), &positions)));
             report(&format!("1000 look-ups, plain vector ({round})"), 1000, time(|| look(black_box(&plain), &positions)));
             report(&format!("1000 look-ups, advised mapping ({round})"), 1000, time(|| look(black_box(advised), &positions)));
+            report(&format!("1000 look-ups, library column, shifted ({round})"), 1000, time(|| look(black_box(shifted), &positions)));
+            report(&format!("1000 look-ups, 2048-row column ({round})"), 1000, time(|| look(black_box(tiny), &tiny_positions)));
             report(&format!("1000 look-ups, library column, if-let ({round})"), 1000, time(|| look_some(black_box(&a), &positions)));
-            report(&format!("1000 look-ups, plain vector, if-let ({round})"), 1000, time(|| look_some(black_box(&plain), &positions)));
         }
     }
     if want("take") {
