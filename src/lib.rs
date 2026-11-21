@@ -62,8 +62,8 @@
 //!   from memory once, by all cores, into one contiguous result.
 //! * **Mutation is proved, not locked.** Shared data is immutable; mutation
 //!   needs unique ownership (checked by the borrow checker and one reference
-//!   count) or goes through a snapshot-isolated [`sync::SharedFrame`]. No read
-//!   path contains a lock.
+//!   count) or goes through a snapshot-isolated [`sync::SharedFrame`]. Reading
+//!   column data never takes a lock.
 //!
 //! # Safety
 //!

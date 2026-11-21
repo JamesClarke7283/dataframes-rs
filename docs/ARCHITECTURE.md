@@ -421,7 +421,7 @@ written once and re-instantiated inside a `#[target_feature]` wrapper
 | 0 | **Frozen sharing.** Handles are cloned and sent freely; all access is through `&self`. | the type system | none |
 | 1 | **Exclusive mutation.** `&mut` methods update in place if the buffer is uniquely owned, else copy-on-write, per column. | the borrow checker + one reference count | none |
 | 2 | **Partitioned mutation.** One `&mut [T]` is split into disjoint parts, or the columns of one `&mut DataFrame` are handed to different workers (`par_apply_columns`). | the borrow checker (disjoint `&mut`) | none |
-| 3 | **Snapshot isolation.** `SharedFrame` publishes immutable versions; writers build the next one privately. | one atomic version swap | one atomic load per access |
+| 3 | **Snapshot isolation.** `SharedFrame` publishes immutable versions; writers build the next one privately. | one version pointer, replaced in a single step | one atomic load per access |
 
 Choose the lowest tier that fits: tiers 0–2 have no run-time cost at all.
 
@@ -549,7 +549,7 @@ check ownership once, then run a plain loop over `&mut [T]`.
 | huge-page blocks, pooled | no page-fault storm for large results; fewer TLB misses | parked memory (bounded, decaying); virtual size classes waste up to 25 % |
 | `Series` as an inline enum | no vtable, no box, inlinable dispatch | `Series` is larger than a pointer; adding a type touches the enum |
 | `DataFrame` as shared column set + window | slice and clone independent of width | first access through a window narrows the columns once |
-| snapshot isolation for shared mutation | readers never block; atomic multi-column writes | one writer at a time; a writer copies the columns it changes |
+| snapshot isolation for shared mutation | readers never wait for a write; atomic multi-column writes | one writer at a time; a writer copies the columns it changes; fetching a new version takes a short mutex |
 | fixed association order for float reductions | bit-identical results across threads and CPUs | cannot use the fastest order on each machine |
 | run-time CPU dispatch | one portable binary | one predictable branch per kernel call |
 | workers poll for 100 µs after a parallel region | columns from 64 KiB use every core; a region starts in under a microsecond | a burst of idle CPU after each region |

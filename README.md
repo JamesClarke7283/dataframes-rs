@@ -146,16 +146,16 @@ A filter is two kernels joined by a bitmask: *compare* turns 64 rows into one ma
 
 ## Thread-safe concurrent mutation
 
-Four tiers, from cheapest to most general. Each rests on a different proof of safety, and none puts a lock on the read path. The full specification is in [`src/sync/mod.rs`](src/sync/mod.rs) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#5-concurrency-specification).
+Four tiers, from cheapest to most general. Each rests on a different proof of safety, and none puts a lock between a reader and the data it reads. The full specification is in [`src/sync/mod.rs`](src/sync/mod.rs) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#5-concurrency-specification).
 
 | tier | mechanism | what proves it safe | cost on the read path |
 |-----:|-----------|---------------------|-----------------------|
 | 0 | frozen sharing: frames, series and buffers are `Send + Sync` and immutable while shared | the type system | none |
 | 1 | exclusive mutation: `&mut` methods update in place when the buffer is uniquely owned, else copy-on-write, per column | the borrow checker and one reference count | none |
 | 2 | partitioned mutation: disjoint `&mut` parts of a column, or the columns of a frame, across threads | the borrow checker | none |
-| 3 | snapshot isolation: `SharedFrame` publishes immutable versions; writers build the next one privately | one atomic version swap | one atomic load |
+| 3 | snapshot isolation: `SharedFrame` publishes immutable versions; writers build the next one privately | one version pointer, replaced in a single step | one atomic load |
 
-- **Readers never block and never see a partial write.** A `Snapshot` pins one version; everything reachable from it is frozen.
+- **Readers never wait for a write and never see a partial one.** A `Snapshot` pins one version; everything reachable from it is frozen. Fetching a version copies one reference-counted pointer under a mutex that is never held across other work, and a `FrameReader` does even that only after a writer has published.
 - **Writers are serialised and atomic.** A write runs on a private frame that shares every buffer with the current version and becomes visible in one step. A panic or an error publishes nothing.
 - **A write costs what it touches.** Updating a column copies that column and shares the rest. Appending rows extends the shared buffers in place, beyond the end of every published view, and copies only the new rows.
 - **Versions are totally ordered** by an epoch; a reader's epochs never go backwards.

@@ -2,24 +2,27 @@
 //!
 //! The crate offers four ways to change data, ordered from cheapest to most
 //! general. Each rests on a different proof of safety, and none of them puts a
-//! lock on the read path.
+//! lock between a reader and the data it reads.
 //!
 //! | tier | mechanism | who proves it safe | read path |
 //! |------|-----------|--------------------|-----------|
 //! | 0 | frozen sharing: `DataFrame`, `Series`, `Buffer` are `Send + Sync` and immutable while shared | the type system (`&self` API) | plain loads |
 //! | 1 | exclusive mutation: `&mut` methods update in place if the buffer is uniquely owned, else copy-on-write, per column | the borrow checker + reference count | plain loads |
 //! | 2 | partitioned mutation: split one `&mut [T]` or the columns of one `&mut DataFrame` across workers | the borrow checker (disjoint `&mut`) | plain loads |
-//! | 3 | snapshot isolation: [`SharedFrame`] publishes immutable versions; writers build the next one privately | an atomic pointer swap | one atomic load per access |
+//! | 3 | snapshot isolation: [`SharedFrame`] publishes immutable versions; writers build the next one privately | one version pointer, replaced in a single step | one atomic load per access |
 //!
 //! # Specification of tier 3
 //!
 //! A [`SharedFrame`] holds a current *version*: an immutable [`DataFrame`]
 //! and an epoch number.
 //!
-//! * **Readers never block and never observe a partial write.** A reader
-//!   takes a [`Snapshot`] (or reuses the one cached in its [`FrameReader`]),
-//!   which pins one version for as long as it is held. Everything reachable
-//!   from a snapshot is frozen (tier 0), so reads run at full speed.
+//! * **Readers never wait for a write and never observe a partial one.** A
+//!   reader takes a [`Snapshot`] (or reuses the one cached in its
+//!   [`FrameReader`]), which pins one version for as long as it is held.
+//!   Everything reachable from a snapshot is frozen (tier 0), so reads run at
+//!   full speed. Fetching a version copies one reference-counted pointer
+//!   under a mutex that is never held across any other work; a
+//!   [`FrameReader`] does even that only after a writer has published.
 //! * **Writers are serialised and atomic.** [`SharedFrame::write`] gives the
 //!   closure a private frame that starts as the current version. Nothing it
 //!   does is visible until the closure returns, at which point the result
