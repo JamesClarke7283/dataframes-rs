@@ -555,7 +555,9 @@ mod tests {
 
     #[test]
     fn huge_blocks_are_2mib_aligned_and_recycled() {
-        let n = 3 * HUGE_BLOCK / 8;
+        // A size class (24 MiB) no other test allocates in, so that a test
+        // running in parallel cannot take the parked block in between.
+        let n = 11 * HUGE_BLOCK / 8;
         let first = {
             let mut v: AlignedVec<u64> = Vec::with_capacity_in(n, ColumnAlloc);
             v.resize(n, 7);
