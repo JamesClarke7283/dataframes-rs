@@ -295,11 +295,24 @@ impl<T: PolarsNumericType> ChunkedArray<T> {
     /// The value at `index`, or `None` if it is null or out of bounds.
     #[inline]
     pub fn get(&self, index: usize) -> Option<T::Native> {
-        let v = *self.values.get(index)?;
+        // Whether the column has nulls at all is asked first, so that a loop
+        // of look-ups into a column without any is the loop one would write
+        // over a plain slice: a bounds check and a load, which a caller that
+        // adds the values up gets folded into its addition. An index past
+        // the end is the rare case, and the compiler is told so.
         match &self.validity {
-            // SAFETY: `index < values.len() == validity.len()`.
-            Some(valid) if !unsafe { valid.get_unchecked(index) } => None,
-            _ => Some(v),
+            None => match self.values.get(index) {
+                Some(&v) => Some(v),
+                None => {
+                    std::hint::cold_path();
+                    None
+                }
+            },
+            Some(valid) => match self.values.get(index) {
+                // SAFETY: `index < values.len() == validity.len()`.
+                Some(&v) if unsafe { valid.get_unchecked(index) } => Some(v),
+                _ => None,
+            },
         }
     }
 

@@ -128,6 +128,28 @@ fn duo(data: &mut [i64], split: usize, caller_cpu: Option<usize>, helper_cpu: Op
     })
 }
 
+/// A thousand look-ups through the column's accessor, the way the benchmark
+/// driver spells them.
+#[inline(never)]
+fn column_gets(column: &dataframes::prelude::Int64Chunked, positions: &[u32]) -> i64 {
+    let mut acc = 0i64;
+    for &i in positions {
+        if let Some(v) = column.get(black_box(i as usize)) {
+            acc = acc.wrapping_add(v);
+        }
+    }
+    acc
+}
+
+#[inline(never)]
+fn column_gets_or(column: &dataframes::prelude::Int64Chunked, positions: &[u32]) -> i64 {
+    let mut acc = 0i64;
+    for &i in positions {
+        acc = acc.wrapping_add(column.get(black_box(i as usize)).unwrap_or(0));
+    }
+    acc
+}
+
 fn report(name: &str, rows: usize, ns: f64) {
     let learned: Vec<String> = par::learned_decisions()
         .iter()
@@ -311,6 +333,34 @@ fn main() {
             }
             acc
         }
+        /// `look_some` with the miss marked as the rare case.
+        #[inline(never)]
+        fn look_cold(data: &[i64], positions: &[u32]) -> i64 {
+            let mut acc = 0i64;
+            for &i in positions {
+                match data.get(black_box(i as usize)) {
+                    Some(&v) => acc = acc.wrapping_add(v),
+                    None => std::hint::cold_path(),
+                }
+            }
+            acc
+        }
+        /// `look` with the miss marked as the rare case.
+        #[inline(never)]
+        fn look_or_cold(data: &[i64], positions: &[u32]) -> i64 {
+            let mut acc = 0i64;
+            for &i in positions {
+                let v = match data.get(black_box(i as usize)) {
+                    Some(&v) => v,
+                    None => {
+                        std::hint::cold_path();
+                        0
+                    }
+                };
+                acc = acc.wrapping_add(v);
+            }
+            acc
+        }
         /// Kilobytes of `data` that sit in huge pages, from the kernel's map.
         fn huge_kb(data: &[i64]) -> usize {
             let (lo, hi) = (data.as_ptr() as usize, data.as_ptr() as usize + size_of_val(data));
@@ -362,6 +412,8 @@ fn main() {
             report(&format!("1000 look-ups, library column, shifted ({round})"), 1000, time(|| look(black_box(shifted), &positions)));
             report(&format!("1000 look-ups, 2048-row column ({round})"), 1000, time(|| look(black_box(tiny), &tiny_positions)));
             report(&format!("1000 look-ups, library column, if-let ({round})"), 1000, time(|| look_some(black_box(&a), &positions)));
+            report(&format!("1000 look-ups, library column, if-let, cold miss ({round})"), 1000, time(|| look_cold(black_box(&a), &positions)));
+            report(&format!("1000 look-ups, library column, or-zero, cold miss ({round})"), 1000, time(|| look_or_cold(black_box(&a), &positions)));
         }
     }
     if want("take") {
@@ -377,13 +429,8 @@ fn main() {
             report(&format!("largest position alone ({round})"), 1000, time(|| black_box(&positions).iter().copied().fold(0u32, u32::max)));
             report(&format!("column take ({round})"), 1000, time(|| column.take(black_box(&index)).unwrap()));
             report(&format!("column take, then sum ({round})"), 1000, time(|| column.take(black_box(&index)).unwrap().sum()));
-            report(&format!("1000 x column get ({round})"), 1000, time(|| {
-                let mut acc = 0i64;
-                for &i in &positions {
-                    acc = acc.wrapping_add(column.get(black_box(i as usize)).unwrap_or(0));
-                }
-                acc
-            }));
+            report(&format!("1000 x column get ({round})"), 1000, time(|| column_gets(black_box(&column), &positions)));
+            report(&format!("1000 x column get, or zero ({round})"), 1000, time(|| column_gets_or(black_box(&column), &positions)));
         }
     }
     if want("filter") {

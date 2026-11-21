@@ -146,7 +146,9 @@ fn main() -> PolarsResult<()> {
         || {
             let mut acc = 0i64;
             for &i in &ds.lookups {
-                acc = acc.wrapping_add(e.get(black_box(i as usize)).unwrap_or(0));
+                if let Some(v) = e.get(black_box(i as usize)) {
+                    acc = acc.wrapping_add(v);
+                }
             }
             acc
         },
@@ -169,7 +171,9 @@ fn main() -> PolarsResult<()> {
             let mut acc = 0i64;
             for &i in &ds.lookups {
                 let column = num.column(black_box("e")).unwrap().i64().unwrap();
-                acc = acc.wrapping_add(column.get(black_box(i as usize)).unwrap_or(0));
+                if let Some(v) = column.get(black_box(i as usize)) {
+                    acc = acc.wrapping_add(v);
+                }
             }
             acc
         },

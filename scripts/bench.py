@@ -163,23 +163,33 @@ def load(path):
 
 
 def reduce(records):
-    """-> {rows: {case: {lib: {"ns": best median, "variant": name, "check": value, "rounds": [...]}}}}
+    """-> {rows: {case: {lib: {"ns": time, "variant": name, "check": value, "rounds": [...]}}}}
 
-    "rounds" holds, per round, the best median over the variants of that
-    round. The records of one (library, case, size) are in round order.
+    Every round is a fresh process. The time of a spelling ("variant") of a
+    case is the mean, over the rounds, of the median that each round
+    measured; a library is represented by its fastest spelling. The mean,
+    not the best round: the same binary can be half as fast again from one
+    process to the next (address-space layout, where its buffers land), and
+    what a user gets is the average of that, not the luckiest draw. The
+    records of one (library, case, size) are in round order.
     """
-    best = defaultdict(lambda: defaultdict(dict))
-    seen = defaultdict(int)
+    rounds = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
     for r in records:
         case, _, variant = r["case"].partition("@")
-        key = (r["rows"], r["case"], r["lib"])
-        rnd, seen[key] = seen[key], seen[key] + 1
-        slot = best[r["rows"]][case]
-        cur = slot.setdefault(r["lib"], {"ns": math.inf, "variant": "", "check": r["check"], "rounds": []})
-        cur["rounds"] += [math.inf] * (rnd + 1 - len(cur["rounds"]))
-        cur["rounds"][rnd] = min(cur["rounds"][rnd], r["median_ns"])
-        if r["median_ns"] < cur["ns"]:
-            cur.update(ns=r["median_ns"], variant=variant, check=r["check"])
+        per_variant = rounds[r["rows"]][case][r["lib"]]
+        per_variant.setdefault(variant, {"times": [], "check": r["check"]})["times"].append(r["median_ns"])
+    best = defaultdict(lambda: defaultdict(dict))
+    for rows, cases in rounds.items():
+        for case, libs in cases.items():
+            for lib, variants in libs.items():
+                variant, entry = min(variants.items(), key=lambda kv: sum(kv[1]["times"]) / len(kv[1]["times"]))
+                times = entry["times"]
+                best[rows][case][lib] = {
+                    "ns": sum(times) / len(times),
+                    "variant": variant,
+                    "check": entry["check"],
+                    "rounds": times,
+                }
     return best
 
 
@@ -200,13 +210,6 @@ def summarise(best):
             ours = entries["dataframes"]["ns"]
             rivals = {lib: e["ns"] for lib, e in entries.items() if lib != "dataframes"}
             fastest_rival = min(rivals, key=rivals.get) if rivals else None
-            # The same comparison round by round: the fastest competitor of
-            # each round against our time in that round.
-            rounds = min((len(e["rounds"]) for e in entries.values()), default=0)
-            by_round = [
-                min(e["rounds"][i] for lib, e in entries.items() if lib != "dataframes") / entries["dataframes"]["rounds"][i]
-                for i in range(rounds)
-            ] if rivals else []
             summary.append(
                 {
                     "rows": rows,
@@ -215,7 +218,7 @@ def summarise(best):
                     "variant": {lib: e["variant"] for lib, e in entries.items() if e["variant"]},
                     "fastest_rival": fastest_rival,
                     "speedup": (rivals[fastest_rival] / ours) if fastest_rival else None,
-                    "speedup_by_round": by_round,
+                    "rounds": {lib: e["rounds"] for lib, e in entries.items()},
                     "checks_agree": checks_agree(entries),
                 }
             )
@@ -223,22 +226,12 @@ def summarise(best):
 
 
 def verdict(entry, tie):
-    """'win', 'level' or 'loss' for one comparison.
-
-    A win is a speed-up over the fastest competitor of more than `tie` on
-    the best times, a loss the same the other way - and either must also
-    show in most rounds. A library whose best time is one lucky process out
-    of several, while it trails in the others, has not won; and one noisy
-    round out of three does not undo a lead that the other two show.
-    """
-    speedup, by_round = entry["speedup"], entry.get("speedup_by_round") or []
-    faster = sum(x > 1.0 for x in by_round) * 2 > len(by_round) or not by_round
-    slower = sum(x < 1.0 for x in by_round) * 2 > len(by_round) or not by_round
-    if speedup >= 1.0 + tie and faster:
+    """'win', 'level' or 'loss' for one comparison: more than `tie` faster
+    than the fastest competitor, within `tie` of it, or more than `tie` slower."""
+    speedup = entry["speedup"]
+    if speedup >= 1.0 + tie:
         return "win"
-    if speedup <= 1.0 - tie and slower:
-        return "loss"
-    return "level"
+    return "level" if speedup > 1.0 - tie else "loss"
 
 
 def headline(summary, tie):
@@ -248,7 +241,7 @@ def headline(summary, tie):
     geo = math.exp(sum(math.log(x) for x in speedups) / len(speedups)) if speedups else float("nan")
     text = f"**dataframes is the fastest library in {wins} of {len(speedups)} comparisons**"
     if level:
-        text += f", level with the fastest (within {tie:.0%}, or not in most rounds) in {level}"
+        text += f", level with the fastest (within {tie:.0%}) in {level}"
     text += f" and slower in {losses}" if losses else " and slower in none"
     text += (f". Geometric-mean speed-up over the fastest competitor: **{geo:.2f}x** "
              f"(smallest {min(speedups):.2f}x, largest {max(speedups):.2f}x).")
@@ -269,7 +262,7 @@ def markdown(summary, meta, tie):
     lines.append("")
     lines.append(machine_line(meta))
     lines.append("")
-    lines.append("Times are the best median over the rounds (lower is better). "
+    lines.append("Times are the mean over the rounds of each round's median (lower is better). "
                  "The last column is the fastest competitor's time divided by ours.")
     for rows in sorted({s["rows"] for s in summary}):
         lines.append("")
