@@ -266,8 +266,9 @@ fn main() {
         // 2 MiB comes from the allocator's huge-page class; the first `rows`
         // elements of it are the column.
         let mut big: AlignedVec<i64> = dataframes::memory::zeroed_vec((2usize << 20) / 8);
-        big[..rows.min(big.len())].copy_from_slice(&a[..rows.min(big.len())]);
-        let huge = &big[..rows.min(big.len())];
+        let n = rows.min(big.len());
+        big[..n].copy_from_slice(&a[..n]);
+        let huge = &big[..n];
         for round in 0..2 {
             report(&format!("mask i64, 1 thread, small pages ({round})"), rows, time(|| kernels::cmp_scalar_mask_with(&a, CmpOp::Lt, 500, 1)));
             report(&format!("mask i64, 1 thread, one huge page ({round})"), rows, time(|| kernels::cmp_scalar_mask_with(huge, CmpOp::Lt, 500, 1)));
