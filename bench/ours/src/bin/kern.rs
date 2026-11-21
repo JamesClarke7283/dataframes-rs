@@ -60,10 +60,21 @@ fn sum_slice(v: &[i64]) -> i64 {
     v.iter().fold(0i64, |a, &b| a.wrapping_add(b))
 }
 
+/// The data of the `duo` experiment: shared between two threads that take
+/// turns, which the type system cannot see.
+struct Turns(*mut i64, usize);
+// SAFETY: the two threads never touch the data at the same time in a way
+// that conflicts; see `duo`.
+unsafe impl Sync for Turns {}
+
 /// One sum split between the calling thread (`data[..split]`) and a helper
 /// thread (`data[split..]`) that polls one cache line for work and answers
-/// on another: nanoseconds per call.
-fn duo(data: &[i64], split: usize, caller_cpu: Option<usize>, helper_cpu: Option<usize>, pause: bool) -> f64 {
+/// on another: nanoseconds per call. With `rewrite`, the calling thread first
+/// updates every element, which leaves the whole input in *its* cache only —
+/// the opposite of the steady state where each thread keeps its own half.
+fn duo(data: &mut [i64], split: usize, caller_cpu: Option<usize>, helper_cpu: Option<usize>, pause: bool, rewrite: bool) -> f64 {
+    let turns = Turns(data.as_mut_ptr(), data.len());
+    let turns = &turns;
     let go = Line(AtomicU64::new(0));
     let answer = Line((AtomicU64::new(0), AtomicI64::new(0)));
     let stop = AtomicBool::new(false);
@@ -85,14 +96,23 @@ fn duo(data: &[i64], split: usize, caller_cpu: Option<usize>, helper_cpu: Option
                     break;
                 }
                 seen = turn;
-                answer.0.1.store(sum_slice(&data[split..]), Ordering::Relaxed);
+                // SAFETY: between `go` and the answer the caller only reads
+                // its own part, and it writes nothing.
+                let part = unsafe { std::slice::from_raw_parts(turns.0.add(split), turns.1 - split) };
+                answer.0.1.store(sum_slice(part), Ordering::Relaxed);
                 answer.0.0.store(turn, Ordering::Release);
             }
         });
         pin_to(caller_cpu);
         let ns = time(|| {
+            if rewrite {
+                // SAFETY: the helper is idle: the previous turn was answered.
+                let all = unsafe { std::slice::from_raw_parts_mut(turns.0, turns.1) };
+                all.iter_mut().for_each(|v| *v = v.wrapping_add(1));
+            }
             let turn = go.0.fetch_add(1, Ordering::AcqRel) + 1;
-            let mine = sum_slice(&data[..split]);
+            // SAFETY: nobody writes during a turn.
+            let mine = sum_slice(unsafe { std::slice::from_raw_parts(turns.0, split) });
             while answer.0.0.load(Ordering::Acquire) != turn {}
             mine.wrapping_add(answer.0.1.load(Ordering::Relaxed))
         });
@@ -173,31 +193,39 @@ fn main() {
     }
     if want("duo") {
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
-        for cpu in 0..cpus {
+        let siblings = |cpu: usize| {
             let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
-            println!("cpu {cpu} shares a core with {}", std::fs::read_to_string(path).unwrap_or_default().trim());
+            std::fs::read_to_string(path).unwrap_or_default().trim().to_string()
+        };
+        for cpu in 0..cpus {
+            println!("cpu {cpu} shares a core with {}", siblings(cpu));
         }
+        let mut d = a.clone();
         let half = rows / 2;
-        report("one thread, not pinned", rows, time(|| sum_slice(&a)));
+        report("one thread, not pinned", rows, time(|| sum_slice(&d)));
         report("team, 2 tasks, 1 helper", rows, time(|| {
             team::run(2, 1, true, &|i| {
-                black_box(sum_slice(&a[i * half..(i + 1) * half]));
+                black_box(sum_slice(&d[i * half..(i + 1) * half]));
             })
         }));
         report("team, 4 tasks, 3 helpers", rows, time(|| {
             team::run(4, 3, true, &|i| {
-                black_box(sum_slice(&a[i * (half / 2)..(i + 1) * (half / 2)]));
+                black_box(sum_slice(&d[i * (half / 2)..(i + 1) * (half / 2)]));
             })
         }));
-        report("duo, nobody pinned, pause", rows, duo(&a, half, None, None, true));
-        report("duo, nobody pinned, no pause", rows, duo(&a, half, None, None, false));
+        report("duo, nobody pinned", rows, duo(&mut d, half, None, None, true, false));
         pin_to(Some(0));
-        report("one thread on cpu 0", rows, time(|| sum_slice(&a)));
+        report("one thread on cpu 0", rows, time(|| sum_slice(&d)));
+        report("rewrite, then one thread on cpu 0", rows, time(|| {
+            d.iter_mut().for_each(|v| *v = v.wrapping_add(1));
+            sum_slice(&d)
+        }));
         for cpu in 1..cpus {
-            report(&format!("duo, cpu 0 + cpu {cpu}, pause"), rows, duo(&a, half, Some(0), Some(cpu), true));
-            report(&format!("duo, cpu 0 + cpu {cpu}, no pause"), rows, duo(&a, half, Some(0), Some(cpu), false));
-            report(&format!("hand-off only, cpu 0 + cpu {cpu}, pause"), rows, duo(&a[..0], 0, Some(0), Some(cpu), true));
-            report(&format!("hand-off only, cpu 0 + cpu {cpu}, no pause"), rows, duo(&a[..0], 0, Some(0), Some(cpu), false));
+            let place = if siblings(cpu) == siblings(0) { "same core" } else { "other core" };
+            report(&format!("duo, cpu 0 + cpu {cpu} ({place})"), rows, duo(&mut d, half, Some(0), Some(cpu), true, false));
+            report(&format!("duo without pause, cpu 0 + cpu {cpu}"), rows, duo(&mut d, half, Some(0), Some(cpu), false, false));
+            report(&format!("rewrite, then duo, cpu 0 + cpu {cpu}"), rows, duo(&mut d, half, Some(0), Some(cpu), true, true));
+            report(&format!("hand-off only, cpu 0 + cpu {cpu}"), rows, duo(&mut [], 0, Some(0), Some(cpu), true, false));
         }
         pin_to(None);
     }
