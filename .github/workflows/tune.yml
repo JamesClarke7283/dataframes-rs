@@ -1,0 +1,54 @@
+name: Tuning
+
+# Compares run-time settings of dataframes (thread counts, polling, block
+# sizes, streaming stores, huge pages) on a GitHub-hosted runner. Started by
+# hand; the table appears in the job summary.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: Row counts, comma separated
+        default: "100000,1000000,10000000"
+      cases:
+        description: Cases, comma separated (empty for the default set)
+        default: ""
+      rounds:
+        description: Rounds per setting and case
+        default: "2"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.100.0"
+  CARGO_TARGET_DIR: target/native
+  RUSTFLAGS: "-C target-cpu=native"
+
+jobs:
+  tune:
+    name: settings on the runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Describe the machine
+        run: |
+          lscpu | grep -E "Model name|^CPU\(s\)|Thread|Core|L1d|L2|L3"
+          echo "transparent huge pages: $(cat /sys/kernel/mm/transparent_hugepage/enabled)"
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Build the driver
+        run: cargo build --release --locked -p bench-ours
+      - name: Compare settings
+        env:
+          ROWS: ${{ inputs.rows }}
+          CASES: ${{ inputs.cases }}
+          ROUNDS: ${{ inputs.rounds }}
+        run: |
+          args=(--rows "$ROWS" --rounds "$ROUNDS")
+          if [ -n "$CASES" ]; then args+=(--case "$CASES"); fi
+          python3 scripts/tune.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"

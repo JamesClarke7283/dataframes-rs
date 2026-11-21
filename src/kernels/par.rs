@@ -102,13 +102,28 @@ fn detect_threads_per_core() -> usize {
     1
 }
 
-/// Threads worth using for memory-bound kernels: one per physical core.
+/// Threads the kernels use: one per physical core.
 ///
 /// Two hardware threads on one core share its L1/L2 and its memory bandwidth,
 /// so for streaming kernels the second thread adds contention, not throughput.
+/// The `DATAFRAMES_MEMORY_THREADS` environment variable overrides the count
+/// (at most [`threads`]).
 #[inline]
 pub fn memory_threads() -> usize {
-    (threads() / threads_per_core()).max(1)
+    static CACHED: AtomicUsize = AtomicUsize::new(0);
+    match CACHED.load(Ordering::Relaxed) {
+        0 => {
+            let n = std::env::var("DATAFRAMES_MEMORY_THREADS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n >= 1)
+                .unwrap_or_else(|| threads() / threads_per_core())
+                .clamp(1, threads());
+            CACHED.store(n, Ordering::Relaxed);
+            n
+        }
+        n => n,
+    }
 }
 
 /// Nanoseconds since the first call, for burst detection.
