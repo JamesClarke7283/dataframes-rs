@@ -675,11 +675,10 @@ check ownership once, then run a plain loop over `&mut [T]`.
 - **Verdicts.** More than 5 % faster than the fastest competitor is a win;
   within 5 % — about what identical code varies by between two processes on a
   shared cloud machine — is level; more than 5 % slower is a loss and fails
-  the workflow. A win or a loss must also show in every round (each round is
-  a fresh process for every library): a best time that one process reached
-  and the next did not is noise, whichever library it flatters, and counts as
-  level. Some cases can only be level: a point look-up is a bounds check and
-  a load in every library.
+  the workflow. A win or a loss must also show in most rounds (each round is
+  a fresh process for every library): a best time that one lucky process
+  reached while the others trailed is noise, whichever library it flatters,
+  and counts as level.
 - **Several machines.** GitHub-hosted runners are not one CPU model: AMD Zen 3
   (AVX2 only), Zen 4 and Zen 5, and Intel Ice Lake, Emerald Rapids and Granite
   Rapids (all with AVX-512) have turned up, with L2 caches from 512 KiB to

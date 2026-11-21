@@ -71,7 +71,7 @@ CASE_TITLES = {
     "slice_frame": "slice 6-column frame (zero-copy)",
     "head_frame": "head(10) of 6-column frame",
     "slice_series": "slice one column (zero-copy)",
-    "get_random_1k": "1000 random point look-ups in a column",
+    "get_random_1k": "the values at 1000 random positions of a column",
     "cell_random_1k": "1000 random cell look-ups by column name",
     "sum_i64": "sum of i64 column",
     "sum_f64": "sum of f64 column",
@@ -225,15 +225,18 @@ def summarise(best):
 def verdict(entry, tie):
     """'win', 'level' or 'loss' for one comparison.
 
-    A win is a speed-up over the fastest competitor of more than `tie`, a
-    loss the same the other way - and either must show in every round. A
-    difference that one round has and the next has not is noise: libraries
-    whose best-ever time is one lucky process out of several are level.
+    A win is a speed-up over the fastest competitor of more than `tie` on
+    the best times, a loss the same the other way - and either must also
+    show in most rounds. A library whose best time is one lucky process out
+    of several, while it trails in the others, has not won; and one noisy
+    round out of three does not undo a lead that the other two show.
     """
     speedup, by_round = entry["speedup"], entry.get("speedup_by_round") or []
-    if speedup >= 1.0 + tie and all(x > 1.0 for x in by_round):
+    faster = sum(x > 1.0 for x in by_round) * 2 > len(by_round) or not by_round
+    slower = sum(x < 1.0 for x in by_round) * 2 > len(by_round) or not by_round
+    if speedup >= 1.0 + tie and faster:
         return "win"
-    if speedup <= 1.0 - tie and all(x < 1.0 for x in by_round):
+    if speedup <= 1.0 - tie and slower:
         return "loss"
     return "level"
 
@@ -245,7 +248,7 @@ def headline(summary, tie):
     geo = math.exp(sum(math.log(x) for x in speedups) / len(speedups)) if speedups else float("nan")
     text = f"**dataframes is the fastest library in {wins} of {len(speedups)} comparisons**"
     if level:
-        text += f", level with the fastest (within {tie:.0%}, or not in every round) in {level}"
+        text += f", level with the fastest (within {tie:.0%}, or not in most rounds) in {level}"
     text += f" and slower in {losses}" if losses else " and slower in none"
     text += (f". Geometric-mean speed-up over the fastest competitor: **{geo:.2f}x** "
              f"(smallest {min(speedups):.2f}x, largest {max(speedups):.2f}x).")

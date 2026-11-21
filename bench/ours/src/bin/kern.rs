@@ -347,6 +347,28 @@ fn main() {
             report(&format!("1000 look-ups, plain vector, if-let ({round})"), 1000, time(|| look_some(black_box(&plain), &positions)));
         }
     }
+    if want("take") {
+        // The values at a thousand positions in one call: the kernel alone,
+        // and the pieces around it that a column-level `take` adds.
+        use dataframes::prelude::*;
+        let positions: Vec<u32> = (0..1000u64).map(|i| ((i * 0x9E37_79B9_7F4A_7C15) >> 11) as u32 % rows as u32).collect();
+        let column = Int64Chunked::from_vec("e".into(), a.to_vec());
+        let index = IdxCa::from_vec("positions".into(), positions.clone());
+        for round in 0..2 {
+            report(&format!("take kernel, 1000 of i64 ({round})"), 1000, time(|| kernels::arith::take(&a[..], black_box(&positions))));
+            report(&format!("take kernel, 1000 of i32 ({round})"), 1000, time(|| kernels::arith::take(&c[..], black_box(&positions))));
+            report(&format!("largest position alone ({round})"), 1000, time(|| black_box(&positions).iter().copied().fold(0u32, u32::max)));
+            report(&format!("column take ({round})"), 1000, time(|| column.take(black_box(&index)).unwrap()));
+            report(&format!("column take, then sum ({round})"), 1000, time(|| column.take(black_box(&index)).unwrap().sum()));
+            report(&format!("1000 x column get ({round})"), 1000, time(|| {
+                let mut acc = 0i64;
+                for &i in &positions {
+                    acc = acc.wrapping_add(column.get(black_box(i as usize)).unwrap_or(0));
+                }
+                acc
+            }));
+        }
+    }
     if want("filter") {
         // The way a column filters itself: a mask, then a compaction, each
         // asking the splitting policy on its own.

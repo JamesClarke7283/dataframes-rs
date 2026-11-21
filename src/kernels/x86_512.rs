@@ -36,6 +36,61 @@ use super::x86::{
 };
 
 // ---------------------------------------------------------------------------
+// gather
+// ---------------------------------------------------------------------------
+
+/// `out[j] = src[idx[j]]` for 8-byte elements, eight per `vpgatherqq`.
+///
+/// The indices are widened to 64 bits first: the gather that takes 32-bit
+/// indices sign-extends them, which would turn rows beyond 2³¹ into negative
+/// offsets.
+///
+/// # Safety
+/// The CPU must support AVX-512 F, every index must be in bounds of the
+/// allocation `src` points into, and `out` must be valid for `idx.len()`
+/// writes and must not overlap the source.
+#[target_feature(enable = "avx512f,avx2")]
+pub unsafe fn gather8(src: *const u64, idx: &[u32], out: *mut u64) {
+    let n = idx.len();
+    let mut j = 0;
+    // SAFETY: `j + 8 <= n` elements of `idx` and `out`; the caller vouches
+    // for the indices.
+    unsafe {
+        while j + 8 <= n {
+            let at = _mm512_cvtepu32_epi64(_mm256_loadu_si256(idx.as_ptr().add(j).cast()));
+            _mm512_storeu_si512(out.add(j).cast(), _mm512_i64gather_epi64::<8>(at, src.cast()));
+            j += 8;
+        }
+        while j < n {
+            out.add(j).write(src.add(*idx.get_unchecked(j) as usize).read());
+            j += 1;
+        }
+    }
+}
+
+/// `out[j] = src[idx[j]]` for 4-byte elements, eight per `vpgatherqd`.
+///
+/// # Safety
+/// As for [`gather8`].
+#[target_feature(enable = "avx512f,avx2")]
+pub unsafe fn gather4(src: *const u32, idx: &[u32], out: *mut u32) {
+    let n = idx.len();
+    let mut j = 0;
+    // SAFETY: as in `gather8`.
+    unsafe {
+        while j + 8 <= n {
+            let at = _mm512_cvtepu32_epi64(_mm256_loadu_si256(idx.as_ptr().add(j).cast()));
+            _mm256_storeu_si256(out.add(j).cast(), _mm512_i64gather_epi32::<4>(at, src.cast()));
+            j += 8;
+        }
+        while j < n {
+            out.add(j).write(src.add(*idx.get_unchecked(j) as usize).read());
+            j += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // compare → bitmask
 // ---------------------------------------------------------------------------
 

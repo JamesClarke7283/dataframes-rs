@@ -152,6 +152,17 @@ fn main() -> PolarsResult<()> {
         },
         |acc| acc as f64,
     );
+    // The same question asked once instead of a thousand times: the values at
+    // those positions as a column, and their sum; with and without the
+    // bounds check that Polars lets a caller skip.
+    let positions = IdxCa::from_vec("positions".into(), ds.lookups.clone());
+    suite.bench("get_random_1k@take", || e.take(black_box(&positions)).unwrap().sum().unwrap_or(0), |acc| acc as f64);
+    suite.bench(
+        "get_random_1k@take_unchecked",
+        // SAFETY: every position is below the number of rows.
+        || unsafe { e.take_unchecked(black_box(&positions)) }.sum().unwrap_or(0),
+        |acc| acc as f64,
+    );
     suite.bench(
         "cell_random_1k",
         || {

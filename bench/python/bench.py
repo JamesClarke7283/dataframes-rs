@@ -128,6 +128,9 @@ def run_pandas(opts, cols, s, lookups):
         return acc
 
     suite.bench("get_random_1k", get_random, int)
+    # The same question asked once instead of a thousand times.
+    positions = np.asarray(lookups, dtype=np.intp)
+    suite.bench("get_random_1k@take", lambda: e_values.take(positions).sum(), int)
     suite.bench("sum_i64", lambda: e.sum(), int)
     suite.bench("sum_f64", lambda: b.sum(), float)
     suite.bench("mean_f64", lambda: b.mean(), float)
@@ -180,6 +183,9 @@ def run_polars(opts, cols, s, lookups):
         return acc
 
     suite.bench("get_random_1k", get_random, int)
+    # The same question asked once instead of a thousand times.
+    positions = pl.Series("positions", lookups, dtype=pl.UInt32)
+    suite.bench("get_random_1k@take", lambda: e.gather(positions).sum(), int)
     suite.bench("sum_i64", lambda: e.sum(), int)
     suite.bench("sum_f64", lambda: b.sum(), float)
     suite.bench("mean_f64", lambda: b.mean(), float)
