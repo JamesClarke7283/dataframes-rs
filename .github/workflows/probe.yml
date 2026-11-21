@@ -20,6 +20,15 @@ on:
       libs:
         description: Libraries to run
         default: "ours,polars,arrow,python"
+      mode:
+        description: "compare (all libraries) or tune (settings of dataframes only)"
+        default: "compare"
+      cases:
+        description: Cases for tune mode, comma separated (empty for the default set)
+        default: ""
+      settings:
+        description: Settings for tune mode, comma separated (empty for all)
+        default: ""
 
 permissions:
   contents: read
@@ -60,33 +69,46 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
       - uses: actions/setup-python@v7
-        if: steps.machine.outputs.match == 'true' && contains(inputs.libs, 'python')
+        if: steps.machine.outputs.match == 'true' && inputs.mode != 'tune' && contains(inputs.libs, 'python')
         with:
           python-version: "3.13"
       - name: Install pandas and the Polars wheel
-        if: steps.machine.outputs.match == 'true' && contains(inputs.libs, 'python')
+        if: steps.machine.outputs.match == 'true' && inputs.mode != 'tune' && contains(inputs.libs, 'python')
         run: python -m pip install -r bench/python/requirements.txt
       - name: Build the drivers
-        if: steps.machine.outputs.match == 'true'
+        if: steps.machine.outputs.match == 'true' && inputs.mode != 'tune'
         run: cargo build --release --locked -p bench-ours -p bench-polars -p bench-arrow -p bench-common
+      - name: Compare settings of dataframes
+        if: steps.machine.outputs.match == 'true' && inputs.mode == 'tune'
+        env:
+          ROWS: ${{ inputs.rows }}
+          ROUNDS: ${{ inputs.rounds }}
+          CASES: ${{ inputs.cases }}
+          SETTINGS: ${{ inputs.settings }}
+        run: |
+          cargo build --release --locked -p bench-ours
+          args=(--rows "$ROWS" --rounds "$ROUNDS")
+          if [ -n "$CASES" ]; then args+=(--case "$CASES"); fi
+          if [ -n "$SETTINGS" ]; then args+=(--settings "$SETTINGS"); fi
+          python3 scripts/tune.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Unit tests on this CPU
-        if: steps.machine.outputs.match == 'true'
+        if: steps.machine.outputs.match == 'true' && inputs.mode != 'tune'
         run: cargo test --release --lib
       - name: Run
-        if: steps.machine.outputs.match == 'true'
+        if: steps.machine.outputs.match == 'true' && inputs.mode != 'tune'
         env:
           ROWS: ${{ inputs.rows }}
           ROUNDS: ${{ inputs.rounds }}
           LIBS: ${{ inputs.libs }}
         run: python3 scripts/bench.py run --per-case --rows "$ROWS" --rounds "$ROUNDS" --time-ms 200 --libs "$LIBS" --out probe/raw.jsonl
       - name: Report
-        if: steps.machine.outputs.match == 'true'
+        if: steps.machine.outputs.match == 'true' && inputs.mode != 'tune'
         run: |
           python3 scripts/bench.py report --input probe/raw.jsonl --out-dir probe --name probe > probe/report.md 2> probe/verdicts.txt || true
           cat probe/report.md >> "$GITHUB_STEP_SUMMARY"
           cat probe/verdicts.txt
       - uses: actions/upload-artifact@v7
-        if: steps.machine.outputs.match == 'true'
+        if: steps.machine.outputs.match == 'true' && inputs.mode != 'tune'
         with:
           name: probe-results
           path: probe/

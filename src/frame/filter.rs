@@ -120,8 +120,7 @@ pub(crate) fn emit_block(
     stream: bool,
     idx: &mut Vec<u32>,
 ) {
-    let sparse = if kernels::level() >= kernels::Level::Avx512 { 8 * count <= rows.len() } else { 5 * count <= 2 * rows.len() };
-    if sinks.len() >= 2 && sparse {
+    if sinks.len() >= 2 && 1000 * count <= index_emit_permille() * rows.len() {
         kernels::mask_indices_into(mask, rows.len(), 0, idx);
         for sink in sinks {
             sink.emit_indices(rows.start, idx, offset, stream);
@@ -131,6 +130,19 @@ pub(crate) fn emit_block(
             sink.emit(rows.clone(), mask, offset, count, stream);
         }
     }
+}
+
+/// Densest block, in selected rows per thousand, that is emitted through a
+/// shared index list: 400 with the AVX2 permutation tables, 125 with AVX-512
+/// compression. The `DATAFRAMES_INDEX_EMIT_PERMILLE` environment variable
+/// overrides it (0 switches the index lists off).
+fn index_emit_permille() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("DATAFRAMES_INDEX_EMIT_PERMILLE").ok().and_then(|v| v.parse().ok()).unwrap_or(
+            if kernels::level() >= kernels::Level::Avx512 { 125 } else { 400 },
+        )
+    })
 }
 
 /// The rows of `df` whose bit is set in `words` (`count` of them), compacted
