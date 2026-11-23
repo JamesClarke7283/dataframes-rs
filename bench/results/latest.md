@@ -1,6 +1,6 @@
-**dataframes is the fastest library in all 75 comparisons**: by more than 5% in 73, by less in 2. Geometric-mean speed-up over the fastest competitor: **2.29x** (smallest 1.04x, largest 49.26x).
+**dataframes is the fastest library in all 75 comparisons**: by more than 5% in 74, by less in 1. Geometric-mean speed-up over the fastest competitor: **2.29x** (smallest 1.03x, largest 50.29x).
 
-Machine: AMD EPYC 9V74 80-Core Processor · 4 threads · Linux 7.0.0-1020-azure · 2026-11-21 12:05 UTC  
+Machine: AMD EPYC 9V74 80-Core Processor · 4 threads · Linux 7.0.0-1020-azure · 2026-11-23 14:52 UTC  
 Versions: Polars (Rust crate) 0.55.2 · Arrow (arrow-rs) 60.1.0 · Polars (Python wheel) 2.1.0 · pandas 3.1.1
 
 Times are the mean over the rounds of each round's median (lower is better). The last column is the fastest competitor's time divided by ours.
@@ -9,88 +9,88 @@ Times are the mean over the rounds of each round's median (lower is better). The
 
 | operation | dataframes | Polars (Rust crate) | Polars (Python wheel) | Arrow (arrow-rs) | pandas | vs fastest competitor |
 |---|---:|---:|---:|---:|---:|---:|
-| compare i64 column to scalar -> mask | **4.16 µs** | 48.82 µs | 15.37 µs | 7.59 µs | 35.96 µs | **1.83x** (Arrow (arrow-rs)) |
-| filter i64 column, 1% selected | **7.49 µs** | 50.93 µs | 22.63 µs | 9.89 µs | 114.16 µs | **1.32x** (Arrow (arrow-rs)) |
-| filter i64 column, 10% selected | **11.48 µs** | 55.79 µs | 30.91 µs | 15.67 µs | 220.75 µs | **1.36x** (Arrow (arrow-rs)) |
-| filter i64 column, 50% selected | **11.91 µs** | 80.46 µs | 34.60 µs | 40.24 µs | 590.45 µs | **2.91x** (Polars (Python wheel)) |
-| filter i64 column, 90% selected | **13.38 µs** | 80.97 µs | 37.22 µs | 56.32 µs | 1.04 ms | **2.78x** (Polars (Python wheel)) |
-| filter f64 column, 50% selected | **11.87 µs** | 96.70 µs | 37.01 µs | 44.25 µs | 580.74 µs | **3.12x** (Polars (Python wheel)) |
-| filter i32 column, 50% selected | **7.21 µs** | 79.10 µs | 19.72 µs | 38.24 µs | 580.29 µs | **2.73x** (Polars (Python wheel)) |
-| filter f32 column, 50% selected | **7.29 µs** | 94.69 µs | 20.61 µs | 39.93 µs | 586.45 µs | **2.83x** (Polars (Python wheel)) |
-| filter 6-column frame by mask, 10% | **33.10 µs** | 118.04 µs | 143.68 µs | 57.44 µs | 293.04 µs | **1.74x** (Arrow (arrow-rs)) |
-| filter 6-column frame by mask, 50% | **52.04 µs** | 213.19 µs | 152.54 µs | 146.73 µs | 1.46 ms | **2.82x** (Arrow (arrow-rs)) |
-| filter frame with a string column, 50% | **49.33 µs** | 151.23 µs | 196.57 µs | 124.05 µs | 1.66 ms | **2.51x** (Arrow (arrow-rs)) |
-| filter 6-column frame by expression, 50% | **49.45 µs** | 195.87 µs | 184.58 µs | 146.58 µs | 1.47 ms | **2.96x** (Arrow (arrow-rs)) |
-| filter frame by `a < x & b < y`, 25% | **54.62 µs** | 201.92 µs | 254.47 µs | 104.90 µs | 476.36 µs | **1.92x** (Arrow (arrow-rs)) |
-| sum of one column over filtered rows | **23.94 µs** | 192.74 µs | 195.35 µs | 46.21 µs | 320.29 µs | **1.93x** (Arrow (arrow-rs)) |
-| slice 6-column frame (zero-copy) | **4.0 ns** | 487.9 ns | 1.15 µs | 199.1 ns | 9.31 µs | **49.26x** (Arrow (arrow-rs)) |
-| head(10) of 6-column frame | **3.9 ns** | 484.6 ns | 1.11 µs | 182.0 ns | 26.30 µs | **46.92x** (Arrow (arrow-rs)) |
-| slice one column (zero-copy) | **11.2 ns** | 61.2 ns | 649.4 ns | 14.4 ns | 6.85 µs | **1.28x** (Arrow (arrow-rs)) |
-| 1000 random point look-ups in a column | **566.1 ns** | 2.42 µs | 169.20 µs | 595.1 ns | 76.93 µs | **1.05x** (Arrow (arrow-rs)) |
-| 1000 random cell look-ups by column name | **10.55 µs** | 19.41 µs | - | 18.15 µs | - | **1.72x** (Arrow (arrow-rs)) |
-| sum of i64 column | **3.81 µs** | 6.79 µs | 8.23 µs | 6.78 µs | 17.42 µs | **1.78x** (Arrow (arrow-rs)) |
-| sum of f64 column | **3.83 µs** | 8.42 µs | 8.35 µs | 6.78 µs | 42.04 µs | **1.77x** (Arrow (arrow-rs)) |
-| mean of f64 column | **3.83 µs** | 8.43 µs | 9.10 µs | 6.78 µs | 72.00 µs | **1.77x** (Arrow (arrow-rs)) |
-| min and max of f64 column | **7.69 µs** | 14.90 µs | 22.45 µs | 42.50 µs | 128.31 µs | **1.94x** (Polars (Rust crate)) |
-| min and max of i64 column | **7.61 µs** | 14.17 µs | 21.53 µs | 13.56 µs | 35.15 µs | **1.78x** (Arrow (arrow-rs)) |
-| in-place update x = x*c + d | **3.89 µs** | 6.91 µs | 49.24 µs | 7.23 µs | 22.26 µs | **1.78x** (Polars (Rust crate)) |
+| compare i64 column to scalar -> mask | **4.16 µs** | 48.82 µs | 14.99 µs | 7.68 µs | 36.18 µs | **1.85x** (Arrow (arrow-rs)) |
+| filter i64 column, 1% selected | **7.49 µs** | 50.93 µs | 22.58 µs | 10.06 µs | 113.91 µs | **1.34x** (Arrow (arrow-rs)) |
+| filter i64 column, 10% selected | **11.49 µs** | 55.75 µs | 30.81 µs | 15.76 µs | 238.75 µs | **1.37x** (Arrow (arrow-rs)) |
+| filter i64 column, 50% selected | **11.97 µs** | 80.24 µs | 33.35 µs | 40.11 µs | 596.92 µs | **2.79x** (Polars (Python wheel)) |
+| filter i64 column, 90% selected | **13.40 µs** | 80.77 µs | 36.91 µs | 57.26 µs | 1.05 ms | **2.75x** (Polars (Python wheel)) |
+| filter f64 column, 50% selected | **11.85 µs** | 95.79 µs | 36.38 µs | 44.37 µs | 589.80 µs | **3.07x** (Polars (Python wheel)) |
+| filter i32 column, 50% selected | **7.20 µs** | 78.86 µs | 20.22 µs | 38.34 µs | 583.29 µs | **2.81x** (Polars (Python wheel)) |
+| filter f32 column, 50% selected | **7.30 µs** | 94.69 µs | 20.49 µs | 39.99 µs | 593.38 µs | **2.81x** (Polars (Python wheel)) |
+| filter 6-column frame by mask, 10% | **33.05 µs** | 116.61 µs | 149.71 µs | 57.36 µs | 293.82 µs | **1.74x** (Arrow (arrow-rs)) |
+| filter 6-column frame by mask, 50% | **51.41 µs** | 211.25 µs | 149.74 µs | 146.78 µs | 1.45 ms | **2.85x** (Arrow (arrow-rs)) |
+| filter frame with a string column, 50% | **49.02 µs** | 158.06 µs | 197.91 µs | 123.99 µs | 1.65 ms | **2.53x** (Arrow (arrow-rs)) |
+| filter 6-column frame by expression, 50% | **49.55 µs** | 196.79 µs | 184.37 µs | 147.10 µs | 1.46 ms | **2.97x** (Arrow (arrow-rs)) |
+| filter frame by `a < x & b < y`, 25% | **54.70 µs** | 202.42 µs | 255.87 µs | 105.49 µs | 479.36 µs | **1.93x** (Arrow (arrow-rs)) |
+| sum of one column over filtered rows | **23.78 µs** | 195.73 µs | 199.57 µs | 46.33 µs | 320.71 µs | **1.95x** (Arrow (arrow-rs)) |
+| slice 6-column frame (zero-copy) | **4.0 ns** | 500.3 ns | 1.17 µs | 184.1 ns | 9.50 µs | **45.46x** (Arrow (arrow-rs)) |
+| head(10) of 6-column frame | **3.9 ns** | 490.3 ns | 1.06 µs | 185.6 ns | 26.32 µs | **47.20x** (Arrow (arrow-rs)) |
+| slice one column (zero-copy) | **11.2 ns** | 60.5 ns | 675.1 ns | 14.4 ns | 6.69 µs | **1.29x** (Arrow (arrow-rs)) |
+| 1000 random point look-ups in a column | **561.4 ns** | 2.41 µs | 186.71 µs | 594.5 ns | 78.43 µs | **1.06x** (Arrow (arrow-rs)) |
+| 1000 random cell look-ups by column name | **10.61 µs** | 19.07 µs | - | 17.97 µs | - | **1.69x** (Arrow (arrow-rs)) |
+| sum of i64 column | **3.80 µs** | 6.79 µs | 8.02 µs | 6.78 µs | 17.53 µs | **1.79x** (Arrow (arrow-rs)) |
+| sum of f64 column | **3.82 µs** | 8.43 µs | 8.65 µs | 6.78 µs | 41.66 µs | **1.77x** (Arrow (arrow-rs)) |
+| mean of f64 column | **3.83 µs** | 8.45 µs | 8.67 µs | 6.78 µs | 72.21 µs | **1.77x** (Arrow (arrow-rs)) |
+| min and max of f64 column | **7.74 µs** | 14.90 µs | 22.61 µs | 42.55 µs | 125.59 µs | **1.93x** (Polars (Rust crate)) |
+| min and max of i64 column | **7.59 µs** | 14.16 µs | 21.67 µs | 13.56 µs | 34.24 µs | **1.79x** (Arrow (arrow-rs)) |
+| in-place update x = x*c + d | **3.88 µs** | 6.91 µs | 49.54 µs | 7.27 µs | 20.33 µs | **1.78x** (Polars (Rust crate)) |
 
 ### 1M rows
 
 | operation | dataframes | Polars (Rust crate) | Polars (Python wheel) | Arrow (arrow-rs) | pandas | vs fastest competitor |
 |---|---:|---:|---:|---:|---:|---:|
-| compare i64 column to scalar -> mask | **48.95 µs** | 495.06 µs | 104.67 µs | 92.94 µs | 142.16 µs | **1.90x** (Arrow (arrow-rs)) |
-| filter i64 column, 1% selected | **70.99 µs** | 521.91 µs | 188.23 µs | 115.81 µs | 734.28 µs | **1.63x** (Arrow (arrow-rs)) |
-| filter i64 column, 10% selected | **109.16 µs** | 597.48 µs | 240.22 µs | 220.63 µs | 2.56 ms | **2.02x** (Arrow (arrow-rs)) |
-| filter i64 column, 50% selected | **123.94 µs** | 806.79 µs | 269.13 µs | 452.16 µs | 8.42 ms | **2.17x** (Polars (Python wheel)) |
-| filter i64 column, 90% selected | **141.85 µs** | 806.47 µs | 301.64 µs | 1.01 ms | 4.92 ms | **2.13x** (Polars (Python wheel)) |
-| filter f64 column, 50% selected | **123.54 µs** | 966.90 µs | 289.82 µs | 475.13 µs | 8.51 ms | **2.35x** (Polars (Python wheel)) |
-| filter i32 column, 50% selected | **58.51 µs** | 799.02 µs | 141.42 µs | 417.88 µs | 8.49 ms | **2.42x** (Polars (Python wheel)) |
-| filter f32 column, 50% selected | **58.60 µs** | 960.61 µs | 144.55 µs | 438.84 µs | 8.13 ms | **2.47x** (Polars (Python wheel)) |
-| filter 6-column frame by mask, 10% | **602.14 µs** | 1.17 ms | 970.72 µs | 1.64 ms | 2.76 ms | **1.61x** (Polars (Python wheel)) |
-| filter 6-column frame by mask, 50% | **991.17 µs** | 1.69 ms | 1.32 ms | 3.16 ms | 11.34 ms | **1.33x** (Polars (Python wheel)) |
-| filter frame with a string column, 50% | **920.35 µs** | 1.55 ms | 1.39 ms | 2.85 ms | 12.66 ms | **1.51x** (Polars (Python wheel)) |
-| filter 6-column frame by expression, 50% | **932.55 µs** | 1.34 ms | 1.23 ms | 3.15 ms | 10.93 ms | **1.32x** (Polars (Python wheel)) |
-| filter frame by `a < x & b < y`, 25% | **739.30 µs** | 1.40 ms | 1.11 ms | 2.67 ms | 3.81 ms | **1.50x** (Polars (Python wheel)) |
-| sum of one column over filtered rows | **105.61 µs** | 758.60 µs | 422.36 µs | 497.37 µs | 5.11 ms | **4.00x** (Polars (Python wheel)) |
-| slice 6-column frame (zero-copy) | **4.0 ns** | 497.9 ns | 1.15 µs | 183.4 ns | 9.29 µs | **45.43x** (Arrow (arrow-rs)) |
-| head(10) of 6-column frame | **4.0 ns** | 480.2 ns | 1.06 µs | 182.9 ns | 25.68 µs | **46.27x** (Arrow (arrow-rs)) |
-| slice one column (zero-copy) | **11.2 ns** | 60.8 ns | 660.5 ns | 14.6 ns | 6.85 µs | **1.30x** (Arrow (arrow-rs)) |
-| 1000 random point look-ups in a column | **576.6 ns** | 2.43 µs | 169.90 µs | 599.0 ns | 79.01 µs | **1.04x** (Arrow (arrow-rs)) |
-| 1000 random cell look-ups by column name | **10.54 µs** | 19.08 µs | - | 18.24 µs | - | **1.73x** (Arrow (arrow-rs)) |
-| sum of i64 column | **45.83 µs** | 89.35 µs | 92.67 µs | 88.04 µs | 101.82 µs | **1.92x** (Arrow (arrow-rs)) |
-| sum of f64 column | **45.94 µs** | 96.90 µs | 97.36 µs | 88.81 µs | 300.55 µs | **1.93x** (Arrow (arrow-rs)) |
-| mean of f64 column | **45.87 µs** | 96.73 µs | 97.16 µs | 88.67 µs | 586.41 µs | **1.93x** (Arrow (arrow-rs)) |
-| min and max of f64 column | **92.55 µs** | 174.61 µs | 208.08 µs | 430.77 µs | 1.04 ms | **1.89x** (Polars (Rust crate)) |
-| min and max of i64 column | **91.71 µs** | 168.46 µs | 207.79 µs | 176.63 µs | 195.81 µs | **1.84x** (Polars (Rust crate)) |
-| in-place update x = x*c + d | **46.88 µs** | 89.59 µs | 422.48 µs | 89.74 µs | 225.50 µs | **1.91x** (Polars (Rust crate)) |
+| compare i64 column to scalar -> mask | **48.93 µs** | 495.45 µs | 104.43 µs | 93.01 µs | 141.50 µs | **1.90x** (Arrow (arrow-rs)) |
+| filter i64 column, 1% selected | **70.85 µs** | 521.70 µs | 188.86 µs | 115.01 µs | 731.59 µs | **1.62x** (Arrow (arrow-rs)) |
+| filter i64 column, 10% selected | **109.12 µs** | 591.59 µs | 239.88 µs | 221.24 µs | 2.56 ms | **2.03x** (Arrow (arrow-rs)) |
+| filter i64 column, 50% selected | **123.78 µs** | 807.34 µs | 268.37 µs | 450.51 µs | 8.46 ms | **2.17x** (Polars (Python wheel)) |
+| filter i64 column, 90% selected | **141.65 µs** | 807.18 µs | 302.59 µs | 1.00 ms | 4.68 ms | **2.14x** (Polars (Python wheel)) |
+| filter f64 column, 50% selected | **123.57 µs** | 966.02 µs | 287.07 µs | 474.63 µs | 8.54 ms | **2.32x** (Polars (Python wheel)) |
+| filter i32 column, 50% selected | **58.40 µs** | 798.03 µs | 140.79 µs | 418.09 µs | 8.41 ms | **2.41x** (Polars (Python wheel)) |
+| filter f32 column, 50% selected | **58.39 µs** | 954.54 µs | 144.79 µs | 439.16 µs | 8.16 ms | **2.48x** (Polars (Python wheel)) |
+| filter 6-column frame by mask, 10% | **630.27 µs** | 1.20 ms | 974.57 µs | 1.72 ms | 2.79 ms | **1.55x** (Polars (Python wheel)) |
+| filter 6-column frame by mask, 50% | **957.69 µs** | 1.65 ms | 1.36 ms | 3.17 ms | 10.98 ms | **1.42x** (Polars (Python wheel)) |
+| filter frame with a string column, 50% | **969.00 µs** | 1.59 ms | 1.47 ms | 2.84 ms | 12.54 ms | **1.52x** (Polars (Python wheel)) |
+| filter 6-column frame by expression, 50% | **966.80 µs** | 1.42 ms | 1.31 ms | 3.17 ms | 11.21 ms | **1.36x** (Polars (Python wheel)) |
+| filter frame by `a < x & b < y`, 25% | **781.61 µs** | 1.44 ms | 1.19 ms | 2.67 ms | 3.90 ms | **1.52x** (Polars (Python wheel)) |
+| sum of one column over filtered rows | **105.68 µs** | 765.15 µs | 450.25 µs | 499.77 µs | 5.12 ms | **4.26x** (Polars (Python wheel)) |
+| slice 6-column frame (zero-copy) | **4.1 ns** | 492.5 ns | 1.15 µs | 183.2 ns | 9.35 µs | **45.21x** (Arrow (arrow-rs)) |
+| head(10) of 6-column frame | **3.9 ns** | 483.2 ns | 1.06 µs | 185.3 ns | 26.30 µs | **47.07x** (Arrow (arrow-rs)) |
+| slice one column (zero-copy) | **11.2 ns** | 60.7 ns | 654.6 ns | 14.6 ns | 6.71 µs | **1.30x** (Arrow (arrow-rs)) |
+| 1000 random point look-ups in a column | **576.2 ns** | 2.42 µs | 174.33 µs | 605.7 ns | 75.89 µs | **1.05x** (Arrow (arrow-rs)) |
+| 1000 random cell look-ups by column name | **10.60 µs** | 18.91 µs | - | 18.24 µs | - | **1.72x** (Arrow (arrow-rs)) |
+| sum of i64 column | **45.92 µs** | 89.10 µs | 92.57 µs | 88.31 µs | 101.77 µs | **1.92x** (Arrow (arrow-rs)) |
+| sum of f64 column | **45.93 µs** | 96.38 µs | 97.06 µs | 88.87 µs | 299.24 µs | **1.93x** (Arrow (arrow-rs)) |
+| mean of f64 column | **45.95 µs** | 96.45 µs | 97.34 µs | 89.55 µs | 591.13 µs | **1.95x** (Arrow (arrow-rs)) |
+| min and max of f64 column | **92.45 µs** | 174.02 µs | 207.94 µs | 431.03 µs | 1.05 ms | **1.88x** (Polars (Rust crate)) |
+| min and max of i64 column | **91.70 µs** | 167.12 µs | 208.05 µs | 176.14 µs | 195.03 µs | **1.82x** (Polars (Rust crate)) |
+| in-place update x = x*c + d | **47.20 µs** | 89.42 µs | 449.35 µs | 89.40 µs | 225.53 µs | **1.89x** (Arrow (arrow-rs)) |
 
 ### 10M rows
 
 | operation | dataframes | Polars (Rust crate) | Polars (Python wheel) | Arrow (arrow-rs) | pandas | vs fastest competitor |
 |---|---:|---:|---:|---:|---:|---:|
-| compare i64 column to scalar -> mask | **1.49 ms** | 5.08 ms | 2.07 ms | 2.18 ms | 2.40 ms | **1.38x** (Polars (Python wheel)) |
-| filter i64 column, 1% selected | **1.62 ms** | 6.70 ms | 5.71 ms | 3.43 ms | 10.86 ms | **2.12x** (Arrow (arrow-rs)) |
-| filter i64 column, 10% selected | **2.36 ms** | 8.09 ms | 4.81 ms | 5.14 ms | 30.49 ms | **2.04x** (Polars (Python wheel)) |
-| filter i64 column, 50% selected | **2.71 ms** | 8.80 ms | 5.24 ms | 6.17 ms | 60.37 ms | **1.93x** (Polars (Python wheel)) |
-| filter i64 column, 90% selected | **3.50 ms** | 9.18 ms | 6.07 ms | 11.35 ms | 40.54 ms | **1.73x** (Polars (Python wheel)) |
-| filter f64 column, 50% selected | **2.69 ms** | 10.30 ms | 5.50 ms | 6.13 ms | 59.99 ms | **2.04x** (Polars (Python wheel)) |
-| filter i32 column, 50% selected | **949.54 µs** | 8.00 ms | 2.66 ms | 4.67 ms | 60.45 ms | **2.80x** (Polars (Python wheel)) |
-| filter f32 column, 50% selected | **956.35 µs** | 9.56 ms | 2.67 ms | 4.74 ms | 59.68 ms | **2.79x** (Polars (Python wheel)) |
-| filter 6-column frame by mask, 10% | **12.91 ms** | 16.50 ms | 14.10 ms | 25.32 ms | 41.41 ms | **1.09x** (Polars (Python wheel)) |
-| filter 6-column frame by mask, 50% | **14.07 ms** | 20.42 ms | 17.60 ms | 33.42 ms | 66.58 ms | **1.25x** (Polars (Python wheel)) |
-| filter frame with a string column, 50% | **14.38 ms** | 20.42 ms | 18.08 ms | 30.41 ms | 105.34 ms | **1.26x** (Polars (Python wheel)) |
-| filter 6-column frame by expression, 50% | **12.65 ms** | 16.17 ms | 16.29 ms | 33.48 ms | 67.93 ms | **1.28x** (Polars (Rust crate)) |
-| filter frame by `a < x & b < y`, 25% | **12.13 ms** | 15.53 ms | 14.13 ms | 29.77 ms | 51.67 ms | **1.16x** (Polars (Python wheel)) |
-| sum of one column over filtered rows | **3.68 ms** | 6.79 ms | 4.39 ms | 7.46 ms | 32.84 ms | **1.19x** (Polars (Python wheel)) |
-| slice 6-column frame (zero-copy) | **4.0 ns** | 491.1 ns | 1.17 µs | 184.3 ns | 9.69 µs | **46.16x** (Arrow (arrow-rs)) |
-| head(10) of 6-column frame | **4.0 ns** | 476.8 ns | 1.03 µs | 182.0 ns | 26.03 µs | **45.86x** (Arrow (arrow-rs)) |
-| slice one column (zero-copy) | **11.2 ns** | 60.8 ns | 647.9 ns | 14.9 ns | 6.87 µs | **1.32x** (Arrow (arrow-rs)) |
-| 1000 random point look-ups in a column | **583.3 ns** | 2.42 µs | 172.53 µs | 603.8 ns | 77.40 µs | **1.04x** (Arrow (arrow-rs)) |
-| 1000 random cell look-ups by column name | **10.60 µs** | 19.29 µs | - | 18.25 µs | - | **1.72x** (Arrow (arrow-rs)) |
-| sum of i64 column | **1.45 ms** | 2.01 ms | 1.92 ms | 2.18 ms | 2.12 ms | **1.32x** (Polars (Python wheel)) |
-| sum of f64 column | **1.45 ms** | 2.02 ms | 1.96 ms | 2.19 ms | 5.61 ms | **1.35x** (Polars (Python wheel)) |
-| mean of f64 column | **1.46 ms** | 1.97 ms | 1.97 ms | 2.18 ms | 8.49 ms | **1.35x** (Polars (Rust crate)) |
-| min and max of f64 column | **2.88 ms** | 3.71 ms | 3.95 ms | 4.58 ms | 16.50 ms | **1.29x** (Polars (Rust crate)) |
-| min and max of i64 column | **2.87 ms** | 3.66 ms | 3.94 ms | 4.04 ms | 3.59 ms | **1.25x** (pandas) |
-| in-place update x = x*c + d | **1.93 ms** | 2.32 ms | 8.46 ms | 2.30 ms | 4.94 ms | **1.19x** (Arrow (arrow-rs)) |
+| compare i64 column to scalar -> mask | **1.46 ms** | 5.11 ms | 2.08 ms | 2.13 ms | 2.41 ms | **1.42x** (Polars (Python wheel)) |
+| filter i64 column, 1% selected | **1.62 ms** | 6.75 ms | 5.86 ms | 3.45 ms | 10.93 ms | **2.13x** (Arrow (arrow-rs)) |
+| filter i64 column, 10% selected | **2.40 ms** | 8.20 ms | 4.76 ms | 5.12 ms | 30.36 ms | **1.98x** (Polars (Python wheel)) |
+| filter i64 column, 50% selected | **2.67 ms** | 8.82 ms | 5.34 ms | 6.08 ms | 60.81 ms | **2.00x** (Polars (Python wheel)) |
+| filter i64 column, 90% selected | **3.53 ms** | 9.12 ms | 6.29 ms | 11.36 ms | 40.57 ms | **1.78x** (Polars (Python wheel)) |
+| filter f64 column, 50% selected | **2.99 ms** | 10.38 ms | 5.44 ms | 6.14 ms | 60.11 ms | **1.82x** (Polars (Python wheel)) |
+| filter i32 column, 50% selected | **965.85 µs** | 8.02 ms | 2.69 ms | 4.66 ms | 60.72 ms | **2.79x** (Polars (Python wheel)) |
+| filter f32 column, 50% selected | **972.28 µs** | 9.57 ms | 2.77 ms | 4.75 ms | 60.31 ms | **2.85x** (Polars (Python wheel)) |
+| filter 6-column frame by mask, 10% | **12.73 ms** | 16.90 ms | 14.03 ms | 25.27 ms | 40.77 ms | **1.10x** (Polars (Python wheel)) |
+| filter 6-column frame by mask, 50% | **13.97 ms** | 20.26 ms | 17.71 ms | 33.84 ms | 67.24 ms | **1.27x** (Polars (Python wheel)) |
+| filter frame with a string column, 50% | **13.85 ms** | 20.42 ms | 18.14 ms | 30.89 ms | 105.91 ms | **1.31x** (Polars (Python wheel)) |
+| filter 6-column frame by expression, 50% | **12.50 ms** | 16.24 ms | 16.11 ms | 33.80 ms | 68.65 ms | **1.29x** (Polars (Python wheel)) |
+| filter frame by `a < x & b < y`, 25% | **11.91 ms** | 15.36 ms | 14.02 ms | 30.13 ms | 52.01 ms | **1.18x** (Polars (Python wheel)) |
+| sum of one column over filtered rows | **3.60 ms** | 6.76 ms | 4.31 ms | 7.66 ms | 33.52 ms | **1.20x** (Polars (Python wheel)) |
+| slice 6-column frame (zero-copy) | **4.0 ns** | 491.2 ns | 1.13 µs | 183.5 ns | 9.57 µs | **45.37x** (Arrow (arrow-rs)) |
+| head(10) of 6-column frame | **3.9 ns** | 480.1 ns | 1.06 µs | 196.7 ns | 25.97 µs | **50.29x** (Arrow (arrow-rs)) |
+| slice one column (zero-copy) | **11.2 ns** | 60.6 ns | 661.4 ns | 14.5 ns | 6.80 µs | **1.30x** (Arrow (arrow-rs)) |
+| 1000 random point look-ups in a column | **586.9 ns** | 2.42 µs | 174.15 µs | 607.0 ns | 76.75 µs | **1.03x** (Arrow (arrow-rs)) |
+| 1000 random cell look-ups by column name | **10.55 µs** | 18.98 µs | - | 17.49 µs | - | **1.66x** (Arrow (arrow-rs)) |
+| sum of i64 column | **1.37 ms** | 2.12 ms | 1.93 ms | 2.12 ms | 2.11 ms | **1.41x** (Polars (Python wheel)) |
+| sum of f64 column | **1.42 ms** | 1.95 ms | 1.98 ms | 2.10 ms | 5.60 ms | **1.37x** (Polars (Rust crate)) |
+| mean of f64 column | **1.52 ms** | 2.01 ms | 1.95 ms | 2.15 ms | 8.51 ms | **1.28x** (Polars (Python wheel)) |
+| min and max of f64 column | **2.81 ms** | 3.67 ms | 3.94 ms | 4.57 ms | 16.32 ms | **1.30x** (Polars (Rust crate)) |
+| min and max of i64 column | **2.85 ms** | 4.03 ms | 3.87 ms | 4.25 ms | 3.66 ms | **1.28x** (pandas) |
+| in-place update x = x*c + d | **2.00 ms** | 2.25 ms | 9.24 ms | 2.22 ms | 4.80 ms | **1.11x** (Arrow (arrow-rs)) |
